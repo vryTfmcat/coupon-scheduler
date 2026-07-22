@@ -1,0 +1,18 @@
+{
+  "name": "coupon-scheduler",
+  "version": "1.0.0",
+  "description": "Schedule coupons, groceries, shopping reminders, and recurring activities in Obsidian.",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+    "install:local": "node scripts/install-local.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.1",
+    "builtin-modules": "4.0.0",
+    "esbuild": "^0.28.1",
+    "obsidian": "1.13.1",
+    "typescript": "5.9.3"
+  }
+}
