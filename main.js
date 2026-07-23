@@ -1251,7 +1251,7 @@ var CouponSchedulerPlugin = class extends import_obsidian.Plugin {
     if (!existing) {
       await leaf.setViewState({ type: VIEW_TYPE, active: true });
     }
-    await this.app.workspace.revealLeaf(leaf);
+    this.app.workspace.setActiveLeaf(leaf, { focus: true });
   }
   async loadPlannerState() {
     var _a;

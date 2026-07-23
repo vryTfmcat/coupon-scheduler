@@ -35,7 +35,7 @@ export default class CouponSchedulerPlugin extends Plugin {
       await leaf.setViewState({ type: VIEW_TYPE, active: true });
     }
 
-    await this.app.workspace.revealLeaf(leaf);
+    this.app.workspace.setActiveLeaf(leaf, { focus: true });
   }
 
   async loadPlannerState(): Promise<unknown | null> {
