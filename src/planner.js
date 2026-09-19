@@ -20,6 +20,16 @@ const inboxPageTypes = {
   food: ["food"],
 };
 
+const defaultMapSettings = {
+  centerLatitude: 22.6539,
+  centerLongitude: 114.0237,
+  zoom: 13,
+  areaHint: "深圳市龙华区",
+  showUsed: false,
+  tileUrl: "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+  geocoderUrl: "https://nominatim.openstreetmap.org/search",
+};
+
 export async function mountCouponCalendar(container, bridge) {
   const root = container;
   const persistState = bridge.saveState;
@@ -32,6 +42,7 @@ export async function mountCouponCalendar(container, bridge) {
     weekViewButton: root.querySelector("#weekViewButton"),
     dayViewButton: root.querySelector("#dayViewButton"),
     monthViewButton: root.querySelector("#monthViewButton"),
+    mapViewButton: root.querySelector("#mapViewButton"),
     addCardButton: root.querySelector("#addCardButton"),
     importButton: root.querySelector("#importButton"),
     exportButton: root.querySelector("#exportButton"),
@@ -53,6 +64,8 @@ export async function mountCouponCalendar(container, bridge) {
 
   let disposed = false;
   let resizeObserver = null;
+  let mapRenderToken = 0;
+  let placeSearch = { cardId: null, loading: false, error: "", results: [] };
   const saved = await bridge.loadState();
   let state = normalizeState(saved || createDefaultState());
   syncResponsiveLayout();
@@ -90,22 +103,34 @@ function createDefaultState() {
       tag: "all",
       search: "",
     },
+    map: { ...defaultMapSettings },
   };
 }
 
 function normalizeState(nextState) {
   return {
-    cards: Array.isArray(nextState.cards) ? nextState.cards : [],
+    cards: Array.isArray(nextState.cards) ? nextState.cards.map((card) => ({
+      ...card,
+      merchantName: typeof card?.merchantName === "string" ? card.merchantName : "",
+    })) : [],
     events: Array.isArray(nextState.events) ? nextState.events : [],
     selectedCardId: nextState.selectedCardId ?? null,
     selectedEventId: nextState.selectedEventId ?? null,
-    view: ["day", "week", "month"].includes(nextState.view) ? nextState.view : "week",
+    view: ["day", "week", "month", "map"].includes(nextState.view) ? nextState.view : "week",
     inboxPage: ["outing", "food", "trash"].includes(nextState.inboxPage) ? nextState.inboxPage : "outing",
     cursorDate: nextState.cursorDate || toDateInputValue(new Date()),
     filters: {
       type: nextState.filters?.type || "all",
       tag: nextState.filters?.tag || "all",
       search: nextState.filters?.search || "",
+    },
+    map: {
+      ...defaultMapSettings,
+      ...(nextState.map || {}),
+      centerLatitude: finiteNumber(nextState.map?.centerLatitude, defaultMapSettings.centerLatitude),
+      centerLongitude: finiteNumber(nextState.map?.centerLongitude, defaultMapSettings.centerLongitude),
+      zoom: clamp(Math.round(finiteNumber(nextState.map?.zoom, defaultMapSettings.zoom)), 3, 18),
+      showUsed: Boolean(nextState.map?.showUsed),
     },
   };
 }
@@ -128,6 +153,10 @@ function syncControls() {
   el.weekViewButton.classList.toggle("is-active", state.view === "week");
   el.dayViewButton.classList.toggle("is-active", state.view === "day");
   el.monthViewButton.classList.toggle("is-active", state.view === "month");
+  el.mapViewButton.classList.toggle("is-active", state.view === "map");
+  el.prevRange.disabled = state.view === "map";
+  el.todayButton.disabled = state.view === "map";
+  el.nextRange.disabled = state.view === "map";
   el.inboxPageButtons.forEach((button) => {
     button.classList.toggle("is-active", button.dataset.inboxPage === state.inboxPage);
   });
@@ -256,6 +285,13 @@ function renderMiniCard(card) {
 }
 
 function renderCalendar() {
+  if (state.view === "map") {
+    renderMap();
+    return;
+  }
+
+  mapRenderToken += 1;
+  el.calendarGrid.classList.remove("is-map-view");
   if (state.view === "month") {
     renderMonthCalendar();
     return;
@@ -307,6 +343,259 @@ function renderCalendar() {
       selectEvent(node.dataset.eventId);
     });
   });
+}
+
+function renderMap() {
+  const vouchers = getFilteredCards().filter((card) =>
+    card.type === "voucher" &&
+    card.status !== "discarded" &&
+    (state.map.showUsed || card.status !== "used")
+  );
+  const locatedCards = vouchers.filter(hasCoordinates);
+  const reviewCards = vouchers.filter(needsLocationReview);
+  const approximateCount = vouchers.filter(hasApproximateCoordinates).length;
+  const selectedCard = state.selectedCardId ? getCard(state.selectedCardId) : null;
+
+  el.calendarGrid.style.removeProperty("--days");
+  el.calendarGrid.classList.remove("is-month-view", "is-day-view");
+  el.calendarGrid.classList.add("is-map-view");
+  el.calendarTitle.textContent = "券地图";
+  el.rangeLabel.textContent = `${locatedCards.length}/${vouchers.length} 张券已定位${approximateCount ? ` · ${approximateCount} 张待校正` : ""}`;
+
+  const pendingHtml = reviewCards.length
+    ? reviewCards.map((card) => `
+        <button class="map-pending-card ${card.id === state.selectedCardId ? "is-selected" : ""}" type="button" data-map-card-id="${escapeAttribute(card.id)}">
+          <span>${escapeHtml(card.title || "未命名团购券")}</span>
+          <small>${hasApproximateCoordinates(card) ? `商圈候选 · ${escapeHtml(card.location || "未填写地点")}` : escapeHtml(card.location || "尚未填写地点")}</small>
+        </button>
+      `).join("")
+    : `<div class="map-empty">当前筛选中的券都已经精确定位。</div>`;
+
+  replaceWithHtml(el.calendarGrid, `
+    <div class="map-workspace">
+      <div class="map-tools">
+        <label class="map-area-field">
+          <span>搜索区域</span>
+          <input id="mapAreaHint" value="${escapeAttribute(state.map.areaHint)}" placeholder="例如：深圳市龙华区" />
+        </label>
+        <button class="icon-button map-zoom-button" id="mapZoomOut" type="button" aria-label="缩小地图" title="缩小地图">−</button>
+        <span class="map-zoom-label">${state.map.zoom} 级</span>
+        <button class="icon-button map-zoom-button" id="mapZoomIn" type="button" aria-label="放大地图" title="放大地图">＋</button>
+        <button class="text-button" id="centerSelectedPlace" type="button" ${selectedCard && hasCoordinates(selectedCard) ? "" : "disabled"}>以选中商家为中心</button>
+        <label class="map-used-toggle"><input id="mapShowUsed" type="checkbox" ${state.map.showUsed ? "checked" : ""} />显示已使用</label>
+        <details class="map-service-settings">
+          <summary>地图服务</summary>
+          <label><span>瓦片地址</span><input id="mapTileUrl" value="${escapeAttribute(state.map.tileUrl)}" /></label>
+          <label><span>地点搜索</span><input id="mapGeocoderUrl" value="${escapeAttribute(state.map.geocoderUrl)}" /></label>
+        </details>
+      </div>
+      <div class="fixed-map-canvas" id="fixedMapCanvas" tabindex="0" aria-label="固定券地图；选中未定位的券后可点击地图设置位置">
+        <div class="map-tile-layer" aria-hidden="true"></div>
+        <div class="map-marker-layer"></div>
+        ${selectedCard?.type === "voucher" && needsLocationReview(selectedCard) ? `<div class="map-click-hint">点击地图，为“${escapeHtml(selectedCard.title || "未命名团购券")}”${hasCoordinates(selectedCard) ? "校正" : "设置"}位置</div>` : ""}
+        <a class="map-attribution" href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">© OpenStreetMap contributors</a>
+      </div>
+      <section class="map-pending-panel" aria-labelledby="mapPendingTitle">
+        <div class="map-pending-heading">
+          <h3 id="mapPendingTitle">待定位 / 校正</h3>
+          <span>${reviewCards.length} 张</span>
+        </div>
+        <div class="map-pending-list">${pendingHtml}</div>
+      </section>
+    </div>
+  `);
+
+  const canvas = el.calendarGrid.querySelector("#fixedMapCanvas");
+  const token = ++mapRenderToken;
+  root.ownerDocument.defaultView?.requestAnimationFrame(() => {
+    if (disposed || token !== mapRenderToken || !canvas?.isConnected) return;
+    paintFixedMap(canvas, locatedCards);
+  });
+
+  el.calendarGrid.querySelector("#mapZoomOut").addEventListener("click", () => {
+    state.map.zoom = clamp(state.map.zoom - 1, 3, 18);
+    commit();
+  });
+  el.calendarGrid.querySelector("#mapZoomIn").addEventListener("click", () => {
+    state.map.zoom = clamp(state.map.zoom + 1, 3, 18);
+    commit();
+  });
+  el.calendarGrid.querySelector("#mapShowUsed").addEventListener("change", (event) => {
+    state.map.showUsed = event.currentTarget.checked;
+    commit();
+  });
+  el.calendarGrid.querySelector("#mapAreaHint").addEventListener("change", (event) => {
+    state.map.areaHint = event.currentTarget.value.trim();
+    commit();
+  });
+  el.calendarGrid.querySelector("#mapTileUrl").addEventListener("change", (event) => {
+    state.map.tileUrl = event.currentTarget.value.trim() || defaultMapSettings.tileUrl;
+    commit();
+  });
+  el.calendarGrid.querySelector("#mapGeocoderUrl").addEventListener("change", (event) => {
+    state.map.geocoderUrl = event.currentTarget.value.trim() || defaultMapSettings.geocoderUrl;
+    commit();
+  });
+  el.calendarGrid.querySelector("#centerSelectedPlace").addEventListener("click", () => {
+    const card = state.selectedCardId ? getCard(state.selectedCardId) : null;
+    if (!card || !hasCoordinates(card)) return;
+    const point = getMapPoints(card)[0];
+    if (!point) return;
+    state.map.centerLatitude = point.latitude;
+    state.map.centerLongitude = point.longitude;
+    commit();
+  });
+  el.calendarGrid.querySelectorAll("[data-map-card-id]").forEach((button) => {
+    button.addEventListener("click", () => selectCard(button.dataset.mapCardId));
+  });
+
+  canvas.addEventListener("click", (event) => {
+    if (event.target.closest(".map-marker, .map-attribution")) return;
+    const card = state.selectedCardId ? getCard(state.selectedCardId) : null;
+    if (!card || card.type !== "voucher" || card.status === "discarded") {
+      window.alert("请先选择一张团购券，再点击地图设置商家位置。");
+      return;
+    }
+    const rect = canvas.getBoundingClientRect();
+    const point = mapCanvasPointToCoordinates(
+      event.clientX - rect.left,
+      event.clientY - rect.top,
+      rect.width,
+      rect.height,
+      state.map,
+    );
+    updateCard(card.id, { latitude: roundCoordinate(point.latitude), longitude: roundCoordinate(point.longitude), geoPrecision: "manual", geoLabel: "地图手动标注" }, false);
+    commit();
+  });
+}
+
+function paintFixedMap(canvas, cards) {
+  const tileLayer = canvas.querySelector(".map-tile-layer");
+  const markerLayer = canvas.querySelector(".map-marker-layer");
+  const width = canvas.clientWidth;
+  const height = canvas.clientHeight;
+  const zoom = state.map.zoom;
+  const worldSize = 256 * (2 ** zoom);
+  const center = projectCoordinates(state.map.centerLatitude, state.map.centerLongitude, zoom);
+  const left = center.x - width / 2;
+  const top = center.y - height / 2;
+  const firstTileX = Math.floor(left / 256);
+  const lastTileX = Math.floor((left + width) / 256);
+  const firstTileY = Math.max(0, Math.floor(top / 256));
+  const lastTileY = Math.min((2 ** zoom) - 1, Math.floor((top + height) / 256));
+  const tileCount = 2 ** zoom;
+  const tileNodes = [];
+
+  for (let tileY = firstTileY; tileY <= lastTileY; tileY += 1) {
+    for (let tileX = firstTileX; tileX <= lastTileX; tileX += 1) {
+      const wrappedX = ((tileX % tileCount) + tileCount) % tileCount;
+      const image = root.ownerDocument.createElement("img");
+      image.alt = "";
+      image.draggable = false;
+      image.decoding = "async";
+      image.src = buildTileUrl(state.map.tileUrl, zoom, wrappedX, tileY);
+      image.style.left = `${Math.round(tileX * 256 - left)}px`;
+      image.style.top = `${Math.round(tileY * 256 - top)}px`;
+      tileNodes.push(image);
+    }
+  }
+  tileLayer.replaceChildren(...tileNodes);
+
+  const groups = new Map();
+  cards.flatMap((card) => getMapPoints(card).map((point) => ({ card, point }))).forEach((entry) => {
+    const coordinateKey = `${roundCoordinate(entry.point.latitude, 5)},${roundCoordinate(entry.point.longitude, 5)}`;
+    const merchantKey = normalizeMerchantName(getMerchantName(entry.card));
+    const key = `${coordinateKey}|${merchantKey}`;
+    if (!groups.has(key)) groups.set(key, { coordinateKey, entries: [] });
+    groups.get(key).entries.push(entry);
+  });
+
+  const projectedGroups = [...groups.values()].map((group) => {
+    const point = projectCoordinates(group.entries[0].point.latitude, group.entries[0].point.longitude, zoom);
+    let anchorX = point.x - left;
+    if (anchorX < -worldSize / 2) anchorX += worldSize;
+    if (anchorX > width + worldSize / 2) anchorX -= worldSize;
+    return { ...group, anchorX, anchorY: point.y - top };
+  }).filter((group) => group.anchorX >= -140 && group.anchorX <= width + 140 && group.anchorY >= -140 && group.anchorY <= height + 140);
+
+  const homeLayoutPoint = getHomeLayoutPoint(width, height, zoom, left, top, worldSize);
+  const placedRects = homeLayoutPoint ? [{ left: homeLayoutPoint.x - 46, right: homeLayoutPoint.x + 46, top: homeLayoutPoint.y - 94, bottom: homeLayoutPoint.y + 12 }] : [];
+  const markerNodes = [];
+  projectedGroups.forEach((projectedGroup) => {
+    const group = projectedGroup.entries;
+    const merchantName = getMerchantName(group[0].card);
+    const cardIds = [...new Set(group.map(({ card }) => card.id))];
+    const layout = chooseMapMarkerLayout(projectedGroup.anchorX, projectedGroup.anchorY, merchantName, cardIds.length, placedRects, width, height);
+    placedRects.push(layout.rect);
+
+    if (layout.distance > 3) {
+      const leader = root.ownerDocument.createElement("span");
+      leader.className = "map-marker-leader";
+      leader.style.left = `${projectedGroup.anchorX}px`;
+      leader.style.top = `${projectedGroup.anchorY}px`;
+      leader.style.width = `${layout.distance}px`;
+      leader.style.rotate = `${layout.angle}rad`;
+      markerNodes.push(leader);
+    }
+
+    const marker = root.ownerDocument.createElement("button");
+    marker.type = "button";
+    marker.className = `map-marker is-caption-${layout.captionPlacement}${group.some(({ card }) => card.id === state.selectedCardId) ? " is-selected" : ""}${group.every(({ point: mapPoint }) => mapPoint.geoPrecision === "area") ? " is-approximate" : ""}`;
+    marker.style.left = `${layout.x}px`;
+    marker.style.top = `${layout.y}px`;
+    marker.dataset.cardId = group.some(({ card }) => card.id === state.selectedCardId) ? state.selectedCardId : cardIds[0];
+    marker.title = `${merchantName}\n${group.map(({ card, point: mapPoint }) => `${card.title || "未命名团购券"}${mapPoint.label ? ` · ${mapPoint.label}` : card.location ? ` · ${card.location}` : ""}${mapPoint.geoPrecision === "area" ? "（商圈候选）" : ""}`).join("\n")}`;
+    const caption = root.ownerDocument.createElement("span");
+    caption.className = "map-marker-caption";
+    const captionName = root.ownerDocument.createElement("span");
+    captionName.className = "map-marker-caption-name";
+    captionName.textContent = merchantName;
+    caption.append(captionName);
+    if (cardIds.length > 1) {
+      const count = root.ownerDocument.createElement("sup");
+      count.className = "map-marker-count";
+      count.textContent = String(cardIds.length);
+      caption.append(count);
+    }
+    const pin = root.ownerDocument.createElement("span");
+    pin.className = "map-marker-pin";
+    const symbol = root.ownerDocument.createElement("span");
+    symbol.className = "map-marker-symbol";
+    symbol.textContent = getFoodMarkerLabel(group[0].card);
+    pin.append(symbol);
+    marker.append(caption, pin);
+    marker.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const selectedIndex = cardIds.indexOf(state.selectedCardId);
+      selectCard(selectedIndex >= 0 ? cardIds[(selectedIndex + 1) % cardIds.length] : cardIds[0]);
+    });
+    markerNodes.push(marker);
+  });
+
+  const homeMarker = state.map.homeMarker;
+  if (homeMarker?.visible !== false && isCoordinatePair(homeMarker?.latitude, homeMarker?.longitude)) {
+    const homePoint = projectCoordinates(Number(homeMarker.latitude), Number(homeMarker.longitude), zoom);
+    let homeX = homePoint.x - left;
+    if (homeX < -worldSize / 2) homeX += worldSize;
+    if (homeX > width + worldSize / 2) homeX -= worldSize;
+    const homeY = homePoint.y - top;
+    if (homeX >= -50 && homeX <= width + 50 && homeY >= -50 && homeY <= height + 50) {
+      const home = root.ownerDocument.createElement("div");
+      home.className = "map-home-marker";
+      home.style.left = `${homeX}px`;
+      home.style.top = `${homeY}px`;
+      home.title = homeMarker.label || "家";
+      const icon = root.ownerDocument.createElement("span");
+      icon.className = "map-home-marker-icon";
+      icon.textContent = "⌂";
+      const label = root.ownerDocument.createElement("span");
+      label.className = "map-home-marker-label";
+      label.textContent = homeMarker.label || "家";
+      home.append(label, icon);
+      markerNodes.push(home);
+    }
+  }
+  markerLayer.replaceChildren(...markerNodes);
 }
 
 function renderEventsForCell(date, hour) {
@@ -445,6 +734,12 @@ function renderDetailPanel() {
           <label for="fieldTitle">名称</label>
           <input id="fieldTitle" name="title" value="${escapeAttribute(card.title || "")}" />
         </div>
+        ${card.type === "voucher" ? `
+          <div class="field full">
+            <label for="fieldMerchantName">商家名称</label>
+            <input id="fieldMerchantName" name="merchantName" value="${escapeAttribute(card.merchantName || "")}" placeholder="例如：肯德基；同店多张券请填写相同名称" />
+          </div>
+        ` : ""}
         <div class="field">
           <label for="fieldType">类型</label>
           <select id="fieldType" name="type">
@@ -461,6 +756,25 @@ function renderDetailPanel() {
           <div class="field">
             <label for="fieldLocation">地点</label>
             <input id="fieldLocation" name="location" value="${escapeAttribute(card.location || "")}" placeholder="门店 / 商圈 / 地址" />
+          </div>
+        ` : ""}
+        ${card.type === "voucher" ? `
+          <div class="field full map-location-field">
+            <div class="map-location-heading">
+              <span class="field-title">地图位置</span>
+              <span class="field-hint">${hasCoordinates(card) ? hasApproximateCoordinates(card) ? `已有 ${getMapPoints(card).length} 个位置，含待校正的商圈候选` : `已定位 ${getMapPoints(card).length} 个位置` : "尚未定位"}</span>
+            </div>
+            <div class="coordinate-row">
+              <label><span>纬度</span><input id="fieldLatitude" name="latitude" type="number" step="0.000001" value="${escapeAttribute(coordinateInputValue(card.latitude))}" placeholder="22.000000" /></label>
+              <label><span>经度</span><input id="fieldLongitude" name="longitude" type="number" step="0.000001" value="${escapeAttribute(coordinateInputValue(card.longitude))}" placeholder="114.000000" /></label>
+            </div>
+            <div class="map-location-actions">
+              <button class="text-button" id="searchCardLocationButton" type="button" ${placeSearch.loading && placeSearch.cardId === card.id ? "disabled" : ""}>${placeSearch.loading && placeSearch.cardId === card.id ? "正在搜索…" : "搜索这个商家"}</button>
+              ${isCoordinatePair(card.latitude, card.longitude) ? `<button class="text-button" id="clearCardLocationButton" type="button">清除主位置</button>` : ""}
+              <span class="field-hint">搜索只在点击按钮时联网；也可切到地图后点击底图。</span>
+            </div>
+            ${renderPlaceSearchResults(card)}
+            ${renderAdditionalMapLocations(card)}
           </div>
         ` : ""}
         ${card.type === "weeklyActivity" ? `
@@ -558,6 +872,55 @@ function renderEventEditor(event) {
   `;
 }
 
+function renderPlaceSearchResults(card) {
+  if (placeSearch.cardId !== card.id) return "";
+  if (placeSearch.error) {
+    return `<div class="place-search-message is-error">${escapeHtml(placeSearch.error)}</div>`;
+  }
+  if (!placeSearch.results.length && !placeSearch.loading) {
+    return `<div class="place-search-message">没有找到合适地点。可以补充门店或商圈后重试，也可以在地图上手动点选。</div>`;
+  }
+  if (!placeSearch.results.length) return "";
+  return `
+    <div class="place-search-results" aria-label="地点搜索结果">
+      ${placeSearch.results.map((result, index) => `
+        <button type="button" data-place-result="${index}">
+          <span>${escapeHtml(result.displayName)}</span>
+          <small>${result.latitude.toFixed(6)}, ${result.longitude.toFixed(6)}</small>
+        </button>
+      `).join("")}
+    </div>
+  `;
+}
+
+function renderAdditionalMapLocations(card) {
+  const locations = Array.isArray(card.mapLocations) ? card.mapLocations : [];
+  const rows = locations.length
+    ? locations.map((location, index) => `
+        <div class="additional-map-location" data-extra-location-index="${index}">
+          <div class="additional-map-location-heading">
+            <input data-extra-location-field="label" value="${escapeAttribute(location.label || "")}" placeholder="门店 / 商圈名称" aria-label="其他门店名称" />
+            <button class="text-button" type="button" data-remove-map-location="${index}">移除</button>
+          </div>
+          <div class="coordinate-row">
+            <label><span>纬度</span><input data-extra-location-field="latitude" type="number" step="0.000001" value="${escapeAttribute(coordinateInputValue(location.latitude))}" placeholder="22.000000" /></label>
+            <label><span>经度</span><input data-extra-location-field="longitude" type="number" step="0.000001" value="${escapeAttribute(coordinateInputValue(location.longitude))}" placeholder="114.000000" /></label>
+          </div>
+          <span class="field-hint">${isCoordinatePair(location.latitude, location.longitude) ? location.geoPrecision === "area" ? "商圈候选位置" : "已定位" : "请补全经纬度"}</span>
+        </div>
+      `).join("")
+    : `<span class="field-hint">如果一张券可在多家门店使用，可继续添加位置。</span>`;
+  return `
+    <div class="additional-map-locations">
+      <div class="additional-map-locations-title">
+        <span class="field-title">其他可用门店</span>
+        <button class="text-button" id="addMapLocationButton" type="button">新增门店位置</button>
+      </div>
+      ${rows}
+    </div>
+  `;
+}
+
 function bindDetailForm(card, event) {
   const form = root.querySelector("#detailForm");
   form.addEventListener("input", (domEvent) => {
@@ -578,6 +941,65 @@ function bindDetailForm(card, event) {
 
   root.querySelector("#duplicateCardButton").addEventListener("click", () => {
     duplicateCard(card.id);
+  });
+
+  root.querySelector("#searchCardLocationButton")?.addEventListener("click", () => {
+    void searchCardLocation(card);
+  });
+
+  root.querySelector("#clearCardLocationButton")?.addEventListener("click", () => {
+    updateCard(card.id, { latitude: null, longitude: null, geoLabel: "", geoPrecision: "" }, false);
+    placeSearch = { cardId: null, loading: false, error: "", results: [] };
+    commit();
+  });
+
+  root.querySelector("#addMapLocationButton")?.addEventListener("click", () => {
+    const locations = Array.isArray(card.mapLocations) ? card.mapLocations.map((location) => ({ ...location })) : [];
+    locations.push({ id: createId(), label: "", latitude: null, longitude: null, geoLabel: "", geoPrecision: "" });
+    updateCard(card.id, { mapLocations: locations });
+  });
+
+  root.querySelectorAll("[data-extra-location-field]").forEach((input) => {
+    input.addEventListener("change", () => {
+      const row = input.closest("[data-extra-location-index]");
+      const index = Number(row?.dataset.extraLocationIndex);
+      if (!Number.isInteger(index)) return;
+      const locations = Array.isArray(card.mapLocations) ? card.mapLocations.map((location) => ({ ...location })) : [];
+      if (!locations[index]) return;
+      const field = input.dataset.extraLocationField;
+      if (["latitude", "longitude"].includes(field)) {
+        locations[index][field] = input.value === "" ? null : Number(input.value);
+        locations[index].geoPrecision = input.value === "" ? "" : "manual";
+      } else {
+        locations[index][field] = input.value.trim();
+      }
+      updateCard(card.id, { mapLocations: locations });
+    });
+  });
+
+  root.querySelectorAll("[data-remove-map-location]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const index = Number(button.dataset.removeMapLocation);
+      const locations = Array.isArray(card.mapLocations) ? card.mapLocations.filter((_, locationIndex) => locationIndex !== index) : [];
+      updateCard(card.id, { mapLocations: locations });
+    });
+  });
+
+  root.querySelectorAll("[data-place-result]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const result = placeSearch.results[Number(button.dataset.placeResult)];
+      if (!result) return;
+      updateCard(card.id, {
+        latitude: roundCoordinate(result.latitude),
+        longitude: roundCoordinate(result.longitude),
+        geoLabel: result.displayName,
+        geoPrecision: "search",
+      }, false);
+      state.map.centerLatitude = result.latitude;
+      state.map.centerLongitude = result.longitude;
+      placeSearch = { cardId: null, loading: false, error: "", results: [] };
+      commit();
+    });
   });
 
   root.querySelector("#markUsedButton")?.addEventListener("click", () => {
@@ -625,6 +1047,10 @@ function updateCardFromInput(cardId, name, value) {
     patch[name] = value === "" ? "" : Number(value);
   } else if (name === "tags") {
     patch[name] = splitTags(value);
+  } else if (["latitude", "longitude"].includes(name)) {
+    const parsed = Number(value);
+    patch[name] = value.trim() === "" || !Number.isFinite(parsed) ? null : roundCoordinate(parsed);
+    patch.geoPrecision = patch[name] === null ? "" : "manual";
   } else if (name === "type" && value === "weeklyActivity") {
     patch[name] = value;
     patch.repeatWeekday = getCard(cardId)?.repeatWeekday ?? "";
@@ -645,6 +1071,39 @@ function updateCardFromInput(cardId, name, value) {
     return;
   }
   renderWithoutDetail();
+}
+
+async function searchCardLocation(card) {
+  if (!bridge.searchPlace) {
+    placeSearch = { cardId: card.id, loading: false, error: "当前版本不支持地点搜索。", results: [] };
+    renderDetailPanel();
+    return;
+  }
+
+  const location = String(card.location || "").trim();
+  const usefulLocation = ["", "(?)", "?", "待确认地点"].includes(location) ? "" : location;
+  const query = [state.map.areaHint, usefulLocation, card.merchantName || card.title].filter(Boolean).join(" ");
+  if (!query) {
+    placeSearch = { cardId: card.id, loading: false, error: "请先填写商家名称或地点。", results: [] };
+    renderDetailPanel();
+    return;
+  }
+
+  placeSearch = { cardId: card.id, loading: true, error: "", results: [] };
+  renderDetailPanel();
+  try {
+    const results = await bridge.searchPlace(query, state.map.geocoderUrl);
+    placeSearch = { cardId: card.id, loading: false, error: "", results };
+  } catch (error) {
+    console.error("券食日历地点搜索失败", error);
+    placeSearch = {
+      cardId: card.id,
+      loading: false,
+      error: "地点搜索失败。请检查网络或在地图服务中更换搜索地址。",
+      results: [],
+    };
+  }
+  if (state.selectedCardId === card.id) renderDetailPanel();
 }
 
 function updateDesireLabel(value) {
@@ -898,6 +1357,7 @@ function addCard() {
     id: createId(),
     type: "voucher",
     title: "新卡片",
+    merchantName: "",
     source: getDefaultSource(),
     location: "",
     price: "",
@@ -953,6 +1413,7 @@ async function importData(file) {
   const importedCards = cards.map((card) => ({
     ...card,
     id: card.id || createId(),
+    merchantName: typeof card.merchantName === "string" ? card.merchantName : "",
     tags: Array.isArray(card.tags) ? card.tags : splitTags(card.tags || ""),
     updatedAt: nowIso(),
   }));
@@ -991,7 +1452,7 @@ function cardMatchesFilters(card) {
   const search = state.filters.search.trim().toLowerCase();
   const matchesType = state.filters.type === "all" || card.type === state.filters.type;
   const matchesTag = state.filters.tag === "all" || (card.tags || []).includes(state.filters.tag);
-  const haystack = [card.title, card.source, card.location, card.value, getRepeatLabel(card), card.notes, ...(card.tags || [])]
+  const haystack = [card.title, card.merchantName, card.source, card.location, card.value, getRepeatLabel(card), card.notes, ...(card.tags || [])]
     .join(" ")
     .toLowerCase();
   return matchesType && matchesTag && (!search || haystack.includes(search));
@@ -1160,6 +1621,11 @@ function bindEvents() {
     commit();
   });
 
+  el.mapViewButton.addEventListener("click", () => {
+    state.view = "map";
+    commit();
+  });
+
   el.addCardButton.addEventListener("click", addCard);
   el.exportButton.addEventListener("click", exportData);
   el.importButton.addEventListener("click", () => el.importFile.click());
@@ -1284,6 +1750,210 @@ function minutesToTime(totalMinutes) {
 
 function getDefaultEndTime(start) {
   return minutesToTime(Math.min(23 * 60 + 59, toMinutes(start) + 60));
+}
+
+function isCoordinatePair(latitudeValue, longitudeValue) {
+  if (latitudeValue === null || latitudeValue === undefined || latitudeValue === "" ||
+      longitudeValue === null || longitudeValue === undefined || longitudeValue === "") return false;
+  const latitude = Number(latitudeValue);
+  const longitude = Number(longitudeValue);
+  return Number.isFinite(latitude) && Number.isFinite(longitude) &&
+    latitude >= -85.051129 && latitude <= 85.051129 &&
+    longitude >= -180 && longitude <= 180;
+}
+
+function getMapPoints(card) {
+  const points = [];
+  if (isCoordinatePair(card?.latitude, card?.longitude)) {
+    points.push({
+      id: "primary",
+      label: card.geoLabel || card.location || "主位置",
+      latitude: Number(card.latitude),
+      longitude: Number(card.longitude),
+      geoPrecision: card.geoPrecision || "",
+    });
+  }
+  if (Array.isArray(card?.mapLocations)) {
+    card.mapLocations.forEach((location, index) => {
+      if (!isCoordinatePair(location?.latitude, location?.longitude)) return;
+      points.push({
+        id: location.id || `extra-${index}`,
+        label: location.label || location.geoLabel || `其他门店 ${index + 1}`,
+        latitude: Number(location.latitude),
+        longitude: Number(location.longitude),
+        geoPrecision: location.geoPrecision || "",
+      });
+    });
+  }
+  return points;
+}
+
+function getMerchantName(card) {
+  return String(card?.merchantName || card?.title || "未命名商家").trim() || "未命名商家";
+}
+
+function normalizeMerchantName(value) {
+  return String(value || "")
+    .normalize("NFKC")
+    .toLocaleLowerCase("zh-CN")
+    .replace(/[\s·•・()（）【】\[\]_-]+/g, "");
+}
+
+function getHomeLayoutPoint(width, height, zoom, left, top, worldSize) {
+  const homeMarker = state.map.homeMarker;
+  if (homeMarker?.visible === false || !isCoordinatePair(homeMarker?.latitude, homeMarker?.longitude)) return null;
+  const homePoint = projectCoordinates(Number(homeMarker.latitude), Number(homeMarker.longitude), zoom);
+  let x = homePoint.x - left;
+  if (x < -worldSize / 2) x += worldSize;
+  if (x > width + worldSize / 2) x -= worldSize;
+  const y = homePoint.y - top;
+  return x >= -50 && x <= width + 50 && y >= -50 && y <= height + 50 ? { x, y } : null;
+}
+
+function chooseMapMarkerLayout(anchorX, anchorY, merchantName, count, occupiedRects, width, height) {
+  const candidates = [
+    { dx: 0, dy: 0, captionPlacement: "top" },
+    { dx: 0, dy: -68, captionPlacement: "top" },
+    { dx: 68, dy: 0, captionPlacement: "right" },
+    { dx: -68, dy: 0, captionPlacement: "left" },
+    { dx: 0, dy: 68, captionPlacement: "bottom" },
+    { dx: 66, dy: -66, captionPlacement: "right" },
+    { dx: -66, dy: -66, captionPlacement: "left" },
+    { dx: 66, dy: 66, captionPlacement: "right" },
+    { dx: -66, dy: 66, captionPlacement: "left" },
+    { dx: 0, dy: -118, captionPlacement: "top" },
+    { dx: 118, dy: 0, captionPlacement: "right" },
+    { dx: -118, dy: 0, captionPlacement: "left" },
+    { dx: 0, dy: 118, captionPlacement: "bottom" },
+    { dx: 108, dy: -92, captionPlacement: "right" },
+    { dx: -108, dy: -92, captionPlacement: "left" },
+    { dx: 108, dy: 92, captionPlacement: "right" },
+    { dx: -108, dy: 92, captionPlacement: "left" },
+  ];
+  const labelWidth = clamp(24 + Array.from(merchantName).length * 11 + (count > 1 ? String(count).length * 7 : 0), 50, 124);
+  let best = null;
+  candidates.forEach((candidate, index) => {
+    const x = anchorX + candidate.dx;
+    const y = anchorY + candidate.dy;
+    const rect = getMapMarkerRect(x, y, candidate.captionPlacement, labelWidth);
+    const overlap = occupiedRects.reduce((total, occupied) => total + rectangleOverlapArea(rect, occupied), 0);
+    const overflow = Math.max(0, -rect.left) + Math.max(0, rect.right - width) + Math.max(0, -rect.top) + Math.max(0, rect.bottom - height);
+    const distance = Math.hypot(candidate.dx, candidate.dy);
+    const score = overlap * 1000 + overflow * 10000 + distance + index / 100;
+    if (!best || score < best.score) best = { ...candidate, x, y, rect, distance, angle: Math.atan2(candidate.dy, candidate.dx), score };
+  });
+  return best;
+}
+
+function getMapMarkerRect(x, y, captionPlacement, labelWidth) {
+  if (captionPlacement === "right") return { left: x - 22, right: x + 28 + labelWidth, top: y - 43, bottom: y + 5 };
+  if (captionPlacement === "left") return { left: x - 28 - labelWidth, right: x + 22, top: y - 43, bottom: y + 5 };
+  if (captionPlacement === "bottom") return { left: x - Math.max(22, labelWidth / 2), right: x + Math.max(22, labelWidth / 2), top: y - 43, bottom: y + 34 };
+  return { left: x - Math.max(22, labelWidth / 2), right: x + Math.max(22, labelWidth / 2), top: y - 72, bottom: y + 5 };
+}
+
+function rectangleOverlapArea(a, b) {
+  const overlapWidth = Math.max(0, Math.min(a.right, b.right) - Math.max(a.left, b.left));
+  const overlapHeight = Math.max(0, Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top));
+  return overlapWidth * overlapHeight;
+}
+
+function getFoodMarkerLabel(card) {
+  const text = [card?.merchantName, card?.title, card?.tags?.join?.(" "), card?.notes].filter(Boolean).join(" ");
+  const categories = [
+    [/螺蛳粉|老友粉|河粉|米粉|肠粉|凉粉|酸辣粉|粉店|粉馆/, "粉"],
+    [/拉面|小面|拌面|炒面|汤面|面馆|面条|沙茶面|刀削面|烩面|面食|麻辣烫/, "面"],
+    [/烤鸭|鸭脖|鸭掌|鸭翅|鸭/, "鸭"],
+    [/炸鸡|烤鸡|手撕鸡|鸡排|鸡翅|鸡腿|黄焖鸡|鸡/, "鸡"],
+    [/龙虾|虾滑|虾/, "虾"],
+    [/烤鱼|酸菜鱼|水煮鱼|鱼/, "鱼"],
+    [/牛排|牛肉|牛腩|牛杂|牛/, "牛"],
+    [/羊排|羊肉|羊蝎子|羊/, "羊"],
+    [/烤肉|炒肉|猪肉|排骨|肉夹馍|肉/, "肉"],
+    [/火锅|锅圈|干锅|焖锅|香锅/, "锅"],
+    [/汉堡|堡王|麦当劳|肯德基/, "堡"],
+    [/披萨|比萨/, "披"],
+    [/咖啡|拿铁|美式|库迪|瑞幸/, "咖"],
+    [/奶茶|果茶|柠檬茶|冻柠茶|泡茶|茶饮|茶/, "茶"],
+    [/豆花|甜品|蛋糕|糖水|冰淇淋|雪糕|布丁|抹茶/, "甜"],
+    [/寿司|刺身/, "寿"],
+    [/饺子|水饺|锅贴|馄饨|云吞/, "饺"],
+    [/包子|生煎|小笼包|馒头/, "包"],
+    [/粥|稀饭/, "粥"],
+    [/烧烤|烤串|串串|串烧/, "烤"],
+    [/零食|薯片|饼干|坚果/, "零"],
+    [/啤酒|白酒|红酒|酒馆|酒/, "酒"],
+    [/炒饭|盖饭|煲仔饭|饭堂|食堂|米饭|套餐|饭/, "饭"],
+    [/果汁|汽水|可乐|维他奶|饮料|饮品/, "饮"],
+  ];
+  return categories.find(([pattern]) => pattern.test(text))?.[1] || "餐";
+}
+
+function hasCoordinates(card) {
+  return getMapPoints(card).length > 0;
+}
+
+function hasApproximateCoordinates(card) {
+  return getMapPoints(card).some((point) => point.geoPrecision === "area");
+}
+
+function needsLocationReview(card) {
+  return !hasCoordinates(card) || hasApproximateCoordinates(card);
+}
+
+function coordinateInputValue(value) {
+  if (value === null || value === undefined || value === "") return "";
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed.toFixed(6).replace(/0+$/, "").replace(/\.$/, "") : "";
+}
+
+function finiteNumber(value, fallback) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function clamp(value, minimum, maximum) {
+  return Math.min(maximum, Math.max(minimum, value));
+}
+
+function roundCoordinate(value, digits = 6) {
+  const scale = 10 ** digits;
+  return Math.round(Number(value) * scale) / scale;
+}
+
+function projectCoordinates(latitude, longitude, zoom) {
+  const worldSize = 256 * (2 ** zoom);
+  const safeLatitude = clamp(Number(latitude), -85.051129, 85.051129);
+  const sine = Math.sin(safeLatitude * Math.PI / 180);
+  return {
+    x: ((Number(longitude) + 180) / 360) * worldSize,
+    y: (0.5 - Math.log((1 + sine) / (1 - sine)) / (4 * Math.PI)) * worldSize,
+  };
+}
+
+function unprojectCoordinates(x, y, zoom) {
+  const worldSize = 256 * (2 ** zoom);
+  const longitude = (x / worldSize) * 360 - 180;
+  const mercator = Math.PI - (2 * Math.PI * y) / worldSize;
+  const latitude = (180 / Math.PI) * Math.atan(Math.sinh(mercator));
+  return { latitude, longitude };
+}
+
+function mapCanvasPointToCoordinates(x, y, width, height, mapSettings) {
+  const center = projectCoordinates(mapSettings.centerLatitude, mapSettings.centerLongitude, mapSettings.zoom);
+  return unprojectCoordinates(
+    center.x - width / 2 + x,
+    center.y - height / 2 + y,
+    mapSettings.zoom,
+  );
+}
+
+function buildTileUrl(template, zoom, x, y) {
+  const safeTemplate = String(template || "").startsWith("https://") ? template : defaultMapSettings.tileUrl;
+  return safeTemplate
+    .replaceAll("{z}", String(zoom))
+    .replaceAll("{x}", String(x))
+    .replaceAll("{y}", String(y));
 }
 
 function escapeHtml(value) {
