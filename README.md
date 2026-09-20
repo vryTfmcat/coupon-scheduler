@@ -1,56 +1,76 @@
-# Coupon Scheduler
+# Coupon Scheduler / 券食日历
 
-Coupon Scheduler is a local-first calendar workspace for planning coupons, groceries, shopping reminders, red packets, and recurring activities inside Obsidian. A fixed map view can show purchased coupons around a chosen area without providing navigation.
+Coupon Scheduler is a local-first Obsidian calendar for viewing and arranging coupons, groceries, shopping reminders, red packets, and recurring activities. Version `1.3.2` reads business data from ordinary Markdown notes while keeping only device UI preferences in the plugin's `data.json`.
 
-![Coupon Scheduler icon](icon.png)
+券食日历是一个以日历为中心的 Obsidian 插件，用于查看和安排团购券、食材、购物提醒、红包与固定活动。当前版本为 `1.3.2`：业务数据来自普通 Markdown，插件 `data.json` 只保存当前设备的界面状态。
 
-## Features
+## Current capabilities / 当前能力
 
-- Organize unscheduled cards into outings, groceries, and trash.
-- Plan cards in day, week, and month calendar views.
-- Track validity dates, usable hours, locations, prices, tags, and notes.
-- Show located coupons on a fixed OpenStreetMap view, filter used coupons, and keep unlocated coupons in a correction list.
-- Optionally show a private home/center marker from local plugin data; no home address is included in the published source.
-- Show the merchant name beside each map pin and summarize the food category with one Chinese character.
-- Store merchant name separately from the voucher title. Vouchers for the same merchant and map location share one pin with a superscript count; nearby labels are automatically offset with leader lines to reduce overlap.
-- Locate a merchant with an explicit place search, enter coordinates, or select a coupon and click the map.
-- Add multiple usable merchant locations to one coupon while keeping the original single-location data compatible.
-- Keep recurring activities as reusable templates.
-- Move cards to the trash without losing their history.
-- Import and export JSON backups compatible with the Coupon Scheduler web version.
+- Keep the existing day, week, month, card, drag-and-drop, and recycle-bin interface.
+- Read benefits, ordinary items, recurring activities, and schedules from configured Markdown folders.
+- Derive scheduled and completed UI states from Markdown facts and schedule records.
+- Open the exact source Markdown note from a card title or detail action.
+- Keep long card titles and metadata inside their card boundaries.
+- Store only view preferences and other device-local UI state in `data.json`.
 
-## Usage
+- 保留原有日、周、月、卡片、拖拽和回收站界面。
+- 从配置目录读取权益、普通条目、固定活动和安排记录。
+- 根据 Markdown 事实与安排记录派生“未安排、已安排、已使用”等界面状态。
+- 点击卡片标题或详情按钮可打开对应 Markdown。
+- 长标题和元数据不会横向溢出卡片。
+- `data.json` 只保存界面偏好，不保存券、日期、价格或地点坐标等业务事实。
 
-1. Open **Coupon Scheduler** from the ribbon or the command palette.
-2. Select **Add** to create a card.
-3. Drag a card onto the calendar, or select it to edit its details.
-4. Use the outing, grocery, and trash tabs to switch card groups.
-5. Open **Map**, choose an unlocated coupon, then search for its merchant or click the map to place it.
+## Markdown folders / Markdown 目录
 
-An approximate area coordinate can be stored with `geoPrecision: "area"`. These coupons appear on the map with amber markers and stay in **Needs location / correction** until the merchant position is searched or manually corrected.
+Default folders:
 
-The current interface is in Simplified Chinese.
+```text
+50_实体/权益/券食权益/
+50_实体/记录/券食条目/
+50_实体/活动/固定活动/
+50_实体/记录/券食安排/
+```
 
-## Data and privacy
+Only notes carrying the explicit `couponSchedulerItem: true` or `couponSchedulerEvent: true` marker are parsed. Stable IDs are the machine identity; Obsidian wikilinks provide readable navigation.
 
-Calendar data, merchant coordinates, and settings stay in the vault through Obsidian's plugin data API. The plugin does not collect telemetry or upload the planner database.
+插件只识别带有 `couponSchedulerItem: true` 或 `couponSchedulerEvent: true` 的笔记。稳定 ID 用于程序校验，Obsidian 双链用于阅读、跳转和反链。
 
-Opening **Map** downloads only the visible map tiles from the configured tile service. Selecting **Search this merchant** sends that card's merchant name, location text, and configured search-area hint to the configured geocoder. The defaults use OpenStreetMap tiles and the public Nominatim service; searches are user-triggered, cached during the session, and serialized to respect the service limit. Both service endpoints can be changed from **Map → Map services**. See the [OpenStreetMap tile policy](https://operations.osmfoundation.org/policies/tiles/) and [Nominatim usage policy](https://operations.osmfoundation.org/policies/nominatim/).
+## Place integration / 地点联通
 
-Use **Export** to create a portable JSON backup. Coordinates are stored on their coupon cards, so they remain compatible with import and export.
+Coupon Scheduler does not maintain a map database or duplicate coordinates. A benefit may reference one or more place entities with:
+
+```yaml
+usablePlaceIds:
+  - plc_01...
+usableAt:
+  - "[[50_实体/地点/外部地点/某门店-短ID|某门店]]"
+```
+
+The independent [Personal Map](https://github.com/vryTfmcat/personal-map) plugin can search AMap, create or reuse a place note, and write this relationship back to the benefit Markdown. The two plugins do not share source code, settings, private JSON, or a map implementation.
+
+券食日历不维护地图数据库，也不复制经纬度。独立的 [个人地图](https://github.com/vryTfmcat/personal-map) 插件负责高德搜索、创建或复用地点，并把 `usablePlaceIds + usableAt` 回写到券笔记。两个插件不共享源码、设置、私有 JSON 或地图实现。
+
+## Read-only boundary / 当前只读边界
+
+Version `1.3.2` is a read-only adapter for business Markdown. The calendar can display Markdown data and open its source note, but creating, editing, dragging, completing, or discarding business objects has not yet been converted into transactional frontmatter writes. Those write operations are the next storage milestone.
+
+`1.3.2` 对业务 Markdown 仍是只读适配器：日历可以显示数据并打开源笔记，但创建、编辑、拖拽安排、完成和作废尚未改造成 frontmatter 写入事务。这些写操作是下一阶段的存储工作。
+
+## Data history / 历史数据
+
+- Old JSON backups are archival references and are not restored automatically.
+- The archived map edition remains available at [`archive/map-edition-2026-09-19`](https://github.com/vryTfmcat/coupon-scheduler/tree/archive/map-edition-2026-09-19).
+- The current plugin does not read the archived map data or its coordinates.
 
 ## Development
 
 ```bash
 npm install
+npm test
 npm run build
 ```
 
-For local testing, set `OBSIDIAN_VAULT` to your development vault path, then run `npm run install:local`.
-
-## 中文说明
-
-Coupon Scheduler（券食日历）用于在 Obsidian 中安排团购券、食材、购物提醒、红包和固定活动，并通过固定地图查看已购买的券。一张多店通用券可以保存多个可用门店位置。日历和券数据保存在本地；只有打开地图或主动搜索商家时才会访问所配置的地图服务。插件支持日／周／月／地图视图、待定位清单、回收站以及含坐标的 JSON 导入导出。
+Current verification: 6 adapter tests pass, the production build succeeds, and the desktop card grid has been checked with 47 Markdown cards without horizontal overflow.
 
 ## License
 
