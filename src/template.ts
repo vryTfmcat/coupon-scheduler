@@ -18,6 +18,7 @@ export function createAppTemplate(brandIconUrl: string): string {
           <button class="segment-button is-active" id="weekViewButton" type="button">周</button>
           <button class="segment-button" id="dayViewButton" type="button">日</button>
           <button class="segment-button" id="monthViewButton" type="button">月</button>
+          <button class="segment-button" id="mapViewButton" type="button">地图</button>
         </div>
         <button class="text-button primary" id="addCardButton" type="button">新增</button>
         <button class="text-button" id="importButton" type="button">导入</button>

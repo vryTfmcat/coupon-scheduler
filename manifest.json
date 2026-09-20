@@ -1,9 +1,9 @@
 {
   "id": "coupon-scheduler",
   "name": "Coupon Scheduler",
-  "version": "1.0.1",
+  "version": "1.3.2",
   "minAppVersion": "1.6.0",
-  "description": "Schedule coupons, groceries, shopping reminders, and recurring activities in a calendar.",
+  "description": "Schedule coupons, groceries, shopping reminders, and recurring activities in a calendar and fixed coupon map.",
   "author": "vryTfmcat",
   "authorUrl": "https://github.com/vryTfmcat",
   "isDesktopOnly": false
