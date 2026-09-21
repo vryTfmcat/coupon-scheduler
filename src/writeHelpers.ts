@@ -79,6 +79,17 @@ export function replaceMarkdownSection(body: string, heading: string, value: str
   return next.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd() + "\n";
 }
 
+export function replaceTopLevelTitle(body: string, title: string): string {
+  const normalized = body.replace(/^\s+/, "");
+  const lines = normalized.split(/\r?\n/);
+  const headingIndex = lines.findIndex((line) => /^#\s+/.test(line));
+  if (headingIndex >= 0) {
+    lines[headingIndex] = `# ${title.trim() || "未命名卡片"}`;
+    return lines.join("\n").trimEnd() + "\n";
+  }
+  return `# ${title.trim() || "未命名卡片"}\n\n${normalized.trimEnd()}\n`;
+}
+
 function normalizedStatus(status: unknown): string {
   return status === "scheduled" ? "unscheduled" : String(status ?? "");
 }

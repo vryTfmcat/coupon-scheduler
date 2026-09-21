@@ -22,6 +22,7 @@ import {
   eventFingerprint,
   localIsoTimestamp,
   replaceMarkdownSection,
+  replaceTopLevelTitle,
   safeFileStem,
   type CardEntityKind,
 } from "./writeHelpers";
@@ -469,7 +470,8 @@ export class MarkdownPlannerStore {
         throw new MarkdownWriteConflictError(`卡片稳定 ID 已变化：${path}`, [path]);
       }
       this.applyCardFrontmatter(frontmatter, card, kind, false);
-      return { frontmatter, body: replaceMarkdownSection(body, "备注", stringValue(card.notes)) };
+      const titledBody = replaceTopLevelTitle(body, stringValue(card.title));
+      return { frontmatter, body: replaceMarkdownSection(titledBody, "备注", stringValue(card.notes)) };
     });
   }
 

@@ -74,7 +74,7 @@ npm test
 npm run build
 ```
 
-Current verification: 6 adapter tests pass, the production build succeeds, and the desktop card grid has been checked with 47 Markdown cards without horizontal overflow.
+Current verification: 13 storage and adapter tests pass, the production build succeeds, and a real vault test covers creation, editing, scheduling, moving, completion, voiding, external refresh, mtime conflict protection, and relationship diagnostics.
 
 ## License
 

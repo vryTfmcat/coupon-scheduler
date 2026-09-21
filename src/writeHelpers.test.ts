@@ -7,6 +7,7 @@ import {
   eventFingerprint,
   localIsoTimestamp,
   replaceMarkdownSection,
+  replaceTopLevelTitle,
   safeFileStem,
 } from "./writeHelpers.ts";
 
@@ -34,6 +35,11 @@ test("notes section updates without replacing other prose", () => {
   assert.match(updated, /## 备注\n\n新内容。\n第二行。/);
   assert.match(updated, /## 其他\n\n继续保留。/);
   assert.doesNotMatch(updated, /旧内容/);
+});
+
+test("title updates only the first level-one heading", () => {
+  const source = "# 旧标题\n\n## 说明\n\n正文保留。\n";
+  assert.equal(replaceTopLevelTitle(source, "新标题"), "# 新标题\n\n## 说明\n\n正文保留。\n");
 });
 
 test("fingerprints ignore derived schedule status and timestamps", () => {

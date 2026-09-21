@@ -257,6 +257,19 @@ ${replacement.join("\n")}
   ];
   return next.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd() + "\n";
 }
+function replaceTopLevelTitle(body, title) {
+  const normalized = body.replace(/^\s+/, "");
+  const lines = normalized.split(/\r?\n/);
+  const headingIndex = lines.findIndex((line) => /^#\s+/.test(line));
+  if (headingIndex >= 0) {
+    lines[headingIndex] = `# ${title.trim() || "\u672A\u547D\u540D\u5361\u7247"}`;
+    return lines.join("\n").trimEnd() + "\n";
+  }
+  return `# ${title.trim() || "\u672A\u547D\u540D\u5361\u7247"}
+
+${normalized.trimEnd()}
+`;
+}
 function normalizedStatus(status) {
   return status === "scheduled" ? "unscheduled" : String(status != null ? status : "");
 }
@@ -678,7 +691,8 @@ var MarkdownPlannerStore = class {
         throw new MarkdownWriteConflictError(`\u5361\u7247\u7A33\u5B9A ID \u5DF2\u53D8\u5316\uFF1A${path}`, [path]);
       }
       this.applyCardFrontmatter(frontmatter, card, kind, false);
-      return { frontmatter, body: replaceMarkdownSection(body, "\u5907\u6CE8", stringValue2(card.notes)) };
+      const titledBody = replaceTopLevelTitle(body, stringValue2(card.title));
+      return { frontmatter, body: replaceMarkdownSection(titledBody, "\u5907\u6CE8", stringValue2(card.notes)) };
     });
   }
   async createCardFile(card) {
