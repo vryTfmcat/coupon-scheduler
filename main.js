@@ -87,6 +87,11 @@ function stableCardId(frontmatter) {
   var _a, _b;
   return stringValue((_b = (_a = frontmatter.benefitId) != null ? _a : frontmatter.itemId) != null ? _b : frontmatter.activityId);
 }
+function entityKind(frontmatter) {
+  if (frontmatter.entityType === "activity" || frontmatter.activityId) return "activity";
+  if (frontmatter.recordType === "coupon-calendar-item" || frontmatter.itemId) return "item";
+  return "benefit";
+}
 function cardFromMarkdown(file) {
   var _a, _b, _c, _d;
   const { frontmatter } = file;
@@ -96,10 +101,11 @@ function cardFromMarkdown(file) {
   const type = uiCardType(frontmatter.calendarType);
   const location = wikilinkLabel(
     (_b = (_a = frontmatter.usableAt) != null ? _a : frontmatter.placeRefs) != null ? _b : frontmatter.placeRef
-  );
+  ) || stringValue(frontmatter.locationHint);
   const repeatWeekday = stringValue(frontmatter.repeatWeekday);
   return {
     id,
+    entityKind: entityKind(frontmatter),
     type,
     title: stringValue(frontmatter.title) || file.basename,
     merchantName: stringValue(frontmatter.merchantName),
@@ -131,6 +137,8 @@ function eventFromMarkdown(file) {
   return {
     id,
     cardId,
+    subjectKind: ["benefit", "item", "activity"].includes(stringValue(frontmatter.subjectKind)) ? stringValue(frontmatter.subjectKind) : "benefit",
+    subjectRef: stringValue(frontmatter.subjectRef),
     date: stringValue(frontmatter.date),
     start: stringValue(frontmatter.start),
     end: stringValue(frontmatter.end),
@@ -184,26 +192,340 @@ function mergeMarkdownWithUi(markdown, uiState) {
 
 // src/markdownStore.ts
 var import_obsidian = require("obsidian");
+
+// src/writeHelpers.ts
+var CROCKFORD = "0123456789abcdefghjkmnpqrstvwxyz";
+function encodeTime(timestamp) {
+  let value = Math.max(0, Math.floor(timestamp));
+  let output = "";
+  for (let index = 0; index < 10; index += 1) {
+    output = CROCKFORD[value % 32] + output;
+    value = Math.floor(value / 32);
+  }
+  return output;
+}
+function randomChars(length) {
+  const bytes = new Uint8Array(length);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (value) => CROCKFORD[value % 32]).join("");
+}
+function createStableId(prefix, now = Date.now()) {
+  return `${prefix}_${encodeTime(now)}${randomChars(16)}`;
+}
+function cardEntityKind(type) {
+  if (type === "weeklyActivity") return "activity";
+  if (type === "food" || type === "delivery") return "item";
+  return "benefit";
+}
+function cardIdPrefix(type) {
+  const kind = cardEntityKind(type);
+  return kind === "benefit" ? "ben" : kind === "item" ? "csi" : "act";
+}
+function safeFileStem(value) {
+  const cleaned = String(value != null ? value : "").normalize("NFKC").replace(/[\\/:*?"<>|#\[\]^]/g, "-").replace(/\s+/g, " ").replace(/-+/g, "-").replace(/\s*-\s*/g, "-").replace(/-+/g, "-").trim().replace(/^[.\s-]+|[.\s-]+$/g, "");
+  return cleaned.slice(0, 96) || "\u672A\u547D\u540D\u5238\u98DF\u6761\u76EE";
+}
+function localIsoTimestamp(date = /* @__PURE__ */ new Date()) {
+  const offsetMinutes = -date.getTimezoneOffset();
+  const sign = offsetMinutes >= 0 ? "+" : "-";
+  const absolute = Math.abs(offsetMinutes);
+  const offset = `${sign}${String(Math.floor(absolute / 60)).padStart(2, "0")}:${String(absolute % 60).padStart(2, "0")}`;
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 6e4).toISOString().slice(0, 19);
+  return `${local}${offset}`;
+}
+function replaceMarkdownSection(body, heading, value) {
+  const normalizedBody = body.replace(/^\s+/, "");
+  const lines = normalizedBody.split(/\r?\n/);
+  const start = lines.findIndex((line) => line.trim() === `## ${heading}`);
+  const replacement = value.trim() ? value.trim().split(/\r?\n/) : [];
+  if (start < 0) {
+    if (!replacement.length) return normalizedBody.trimEnd() + "\n";
+    const prefix = normalizedBody.trimEnd();
+    return `${prefix}${prefix ? "\n\n" : ""}## ${heading}
+
+${replacement.join("\n")}
+`;
+  }
+  let end = lines.findIndex((line, index) => index > start && /^##\s+/.test(line.trim()));
+  if (end < 0) end = lines.length;
+  const next = [
+    ...lines.slice(0, start + 1),
+    "",
+    ...replacement,
+    ...replacement.length ? [""] : [],
+    ...lines.slice(end)
+  ];
+  return next.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd() + "\n";
+}
+function normalizedStatus(status) {
+  return status === "scheduled" ? "unscheduled" : String(status != null ? status : "");
+}
+function cardFingerprint(card) {
+  return JSON.stringify({
+    id: card.id,
+    type: card.type,
+    title: card.title,
+    merchantName: card.merchantName,
+    source: card.source,
+    location: card.location,
+    price: card.price,
+    value: card.value,
+    validFrom: card.validFrom,
+    validTo: card.validTo,
+    usableStart: card.usableStart,
+    usableEnd: card.usableEnd,
+    desire: card.desire,
+    repeatWeekday: card.repeatWeekday,
+    tags: card.tags,
+    notes: card.notes,
+    status: normalizedStatus(card.status)
+  });
+}
+function eventFingerprint(event) {
+  return JSON.stringify({
+    id: event.id,
+    cardId: event.cardId,
+    date: event.date,
+    start: event.start,
+    end: event.end,
+    status: event.status === "used" ? "used" : "planned"
+  });
+}
+function contentHash(value) {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+// src/markdownStore.ts
 var CONFIG_PATH = "30_\u9879\u76EE/\u5238\u98DF\u65E5\u5386/\u914D\u7F6E/\u5238\u98DF\u65E5\u5386\u914D\u7F6E.md";
+var SELF_WRITE_TTL_MS = 4e3;
 var DEFAULT_FOLDERS = {
   benefitsFolder: "50_\u5B9E\u4F53/\u6743\u76CA/\u5238\u98DF\u6743\u76CA",
   itemsFolder: "50_\u5B9E\u4F53/\u8BB0\u5F55/\u5238\u98DF\u6761\u76EE",
   activitiesFolder: "50_\u5B9E\u4F53/\u6D3B\u52A8/\u56FA\u5B9A\u6D3B\u52A8",
   schedulesFolder: "50_\u5B9E\u4F53/\u8BB0\u5F55/\u5238\u98DF\u5B89\u6392"
 };
+var MarkdownWriteConflictError = class extends Error {
+  constructor(message, paths = []) {
+    super(message);
+    this.paths = paths;
+    this.name = "MarkdownWriteConflictError";
+  }
+};
 function frontmatterString(value, fallback) {
   return typeof value === "string" && value.trim() ? value.trim() : fallback;
 }
-function isInside(file, folder) {
-  return file.path.startsWith(`${(0, import_obsidian.normalizePath)(folder)}/`);
+function stringValue2(value) {
+  if (typeof value === "string") return value.trim();
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  return "";
+}
+function stringList(value) {
+  const values = Array.isArray(value) ? value : value ? [value] : [];
+  return values.map((item) => String(item).trim()).filter(Boolean);
+}
+function isInsidePath(path, folder) {
+  return (0, import_obsidian.normalizePath)(path).startsWith(`${(0, import_obsidian.normalizePath)(folder)}/`);
+}
+function asRecord(value) {
+  return value && typeof value === "object" ? value : {};
+}
+function asCards(value) {
+  const cards = asRecord(value).cards;
+  return Array.isArray(cards) ? cards.filter((card) => card && typeof card === "object") : [];
+}
+function asEvents(value) {
+  const events = asRecord(value).events;
+  return Array.isArray(events) ? events.filter((event) => event && typeof event === "object") : [];
+}
+function splitMarkdown(content) {
+  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
+  if (!match) return { frontmatter: {}, body: content };
+  const parsed = (0, import_obsidian.parseYaml)(match[1]);
+  return {
+    frontmatter: parsed && typeof parsed === "object" ? parsed : {},
+    body: content.slice(match[0].length)
+  };
+}
+function buildMarkdown(frontmatter, body) {
+  const yaml = (0, import_obsidian.stringifyYaml)(frontmatter).trimEnd();
+  return `---
+${yaml}
+---
+
+${body.replace(/^\s+/, "").trimEnd()}
+`;
+}
+function nullableString(value) {
+  const normalized = stringValue2(value);
+  return normalized || null;
+}
+function nullableNumber(value) {
+  if (value === "" || value === null || value === void 0) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+function cardKindFromFrontmatter(frontmatter, card) {
+  if (frontmatter.entityType === "activity" || frontmatter.activityId) return "activity";
+  if (frontmatter.recordType === "coupon-calendar-item" || frontmatter.itemId) return "item";
+  if (frontmatter.entityType === "benefit" || frontmatter.benefitId) return "benefit";
+  return cardEntityKind(card.type);
+}
+function factStatus2(kind, status) {
+  if (kind === "benefit") {
+    if (status === "used") return "used";
+    if (status === "discarded") return "void";
+    return "active";
+  }
+  if (kind === "item") {
+    if (status === "used") return "done";
+    if (status === "discarded") return "discarded";
+    return "active";
+  }
+  return status === "discarded" ? "archived" : "active";
+}
+function tagsForNewCard(kind, tags) {
+  const incoming = stringList(tags).map((tag) => tag.replace(/^#/, ""));
+  const required = kind === "benefit" ? ["\u5B9E\u4F53/\u6743\u76CA", "\u5238\u98DF\u65E5\u5386/\u6743\u76CA"] : kind === "item" ? ["\u8BB0\u5F55/\u5238\u98DF\u6761\u76EE"] : ["\u5B9E\u4F53/\u6D3B\u52A8", "\u5238\u98DF\u65E5\u5386/\u56FA\u5B9A\u6D3B\u52A8"];
+  return [.../* @__PURE__ */ new Set([...required, ...incoming])];
+}
+function wikilink(path, label) {
+  return `[[${path.replace(/\.md$/i, "")}|${label}]]`;
+}
+function linkTarget(value) {
+  var _a, _b;
+  const match = stringValue2(value).match(/^\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]$/);
+  return (_b = (_a = match == null ? void 0 : match[1]) == null ? void 0 : _a.trim()) != null ? _b : "";
+}
+function stableId(frontmatter) {
+  var _a, _b, _c;
+  return stringValue2((_c = (_b = (_a = frontmatter.benefitId) != null ? _a : frontmatter.itemId) != null ? _b : frontmatter.activityId) != null ? _c : frontmatter.placeId);
+}
+function assertUniqueIds(entries, label) {
+  const seen = /* @__PURE__ */ new Set();
+  for (const entry of entries) {
+    const id = stringValue2(entry.id);
+    if (!id) throw new MarkdownWriteConflictError(`${label}\u7F3A\u5C11\u7A33\u5B9A ID\uFF0C\u5DF2\u505C\u6B62\u5199\u5165\u3002`);
+    if (seen.has(id)) throw new MarkdownWriteConflictError(`${label} ID \u91CD\u590D\uFF1A${id}\uFF0C\u5DF2\u505C\u6B62\u5199\u5165\u3002`);
+    seen.add(id);
+  }
 }
 var MarkdownPlannerStore = class {
   constructor(app) {
     this.app = app;
+    this.knownMtimes = /* @__PURE__ */ new Map();
+    this.cardBaseline = /* @__PURE__ */ new Map();
+    this.eventBaseline = /* @__PURE__ */ new Map();
+    this.diagnostics = [];
+    this.selfWrites = /* @__PURE__ */ new Map();
   }
   async loadPlannerState(uiState) {
     const markdown = await this.loadMarkdownState();
     return mergeMarkdownWithUi(markdown, uiState);
+  }
+  getDiagnostics() {
+    return this.diagnostics.map((item) => ({ ...item, paths: [...item.paths] }));
+  }
+  isManagedPath(path) {
+    if ((0, import_obsidian.normalizePath)(path) === (0, import_obsidian.normalizePath)(CONFIG_PATH)) return true;
+    const folders = this.loadFolders();
+    return Object.values(folders).some((folder) => isInsidePath(path, folder));
+  }
+  async isSelfAuthoredChange(fileOrPath) {
+    const path = typeof fileOrPath === "string" ? fileOrPath : fileOrPath.path;
+    const token = this.selfWrites.get(path);
+    if (!token) return false;
+    if (Date.now() > token.until) {
+      this.selfWrites.delete(path);
+      return false;
+    }
+    if (typeof fileOrPath === "string" || token.hash === null) return true;
+    try {
+      const content = await this.app.vault.cachedRead(fileOrPath);
+      return contentHash(content) === token.hash;
+    } catch (e) {
+      return false;
+    }
+  }
+  async syncPlannerState(state) {
+    const cards = asCards(state);
+    const events = asEvents(state);
+    assertUniqueIds(cards, "\u5361\u7247");
+    assertUniqueIds(events, "\u5B89\u6392");
+    const duplicate = this.diagnostics.find((diagnostic) => diagnostic.key.startsWith("duplicate:"));
+    if (duplicate) {
+      throw new MarkdownWriteConflictError(`\u5B58\u5728\u91CD\u590D\u7A33\u5B9A ID\uFF0C\u4FEE\u590D\u524D\u7981\u6B62\u5199\u5165\uFF1A${duplicate.message}`, duplicate.paths);
+    }
+    const cardsById = new Map(cards.map((card) => [stringValue2(card.id), card]));
+    const eventsById = new Map(events.map((event) => [stringValue2(event.id), event]));
+    const changedCards = cards.filter((card) => {
+      const baseline = this.cardBaseline.get(stringValue2(card.id));
+      return !baseline || baseline.fingerprint !== cardFingerprint(card);
+    });
+    const changedEvents = events.filter((event) => {
+      const baseline = this.eventBaseline.get(stringValue2(event.id));
+      return !baseline || baseline.fingerprint !== eventFingerprint(event);
+    });
+    const removedCardIds = [...this.cardBaseline.keys()].filter((id) => !cardsById.has(id));
+    const removedEventIds = [...this.eventBaseline.keys()].filter((id) => !eventsById.has(id));
+    const touchedPaths = /* @__PURE__ */ new Set();
+    for (const card of changedCards) {
+      const baseline = this.cardBaseline.get(stringValue2(card.id));
+      if (baseline) touchedPaths.add(baseline.path);
+    }
+    for (const event of changedEvents) {
+      const baseline = this.eventBaseline.get(stringValue2(event.id));
+      if (baseline) touchedPaths.add(baseline.path);
+    }
+    for (const id of removedCardIds) touchedPaths.add(this.cardBaseline.get(id).path);
+    for (const id of removedEventIds) touchedPaths.add(this.eventBaseline.get(id).path);
+    await this.assertFresh([...touchedPaths]);
+    const backups = /* @__PURE__ */ new Map();
+    const createdPaths = [];
+    try {
+      for (const card of changedCards) {
+        const id = stringValue2(card.id);
+        const baseline = this.cardBaseline.get(id);
+        if (baseline) {
+          await this.updateCardFile(baseline.path, card, backups);
+        } else {
+          const created = await this.createCardFile(card);
+          createdPaths.push(created.path);
+          card.markdownPath = created.path;
+          card.entityKind = created.kind;
+        }
+      }
+      for (const event of changedEvents) {
+        const id = stringValue2(event.id);
+        const baseline = this.eventBaseline.get(id);
+        if (baseline) {
+          await this.updateEventFile(baseline.path, event, backups);
+        } else {
+          const card = cardsById.get(stringValue2(event.cardId));
+          if (!card) throw new MarkdownWriteConflictError(`\u5B89\u6392 ${id} \u627E\u4E0D\u5230\u5BF9\u5E94\u5361\u7247\uFF0C\u5DF2\u505C\u6B62\u5199\u5165\u3002`);
+          const created = await this.createEventFile(event, card);
+          createdPaths.push(created.path);
+          event.markdownPath = created.path;
+          event.subjectKind = cardEntityKind(card.type);
+          event.subjectRef = wikilink(stringValue2(card.markdownPath), stringValue2(card.title) || "\u672A\u547D\u540D\u5361\u7247");
+        }
+      }
+      for (const id of removedEventIds) {
+        await this.cancelEventFile(this.eventBaseline.get(id).path, backups);
+      }
+      for (const id of removedCardIds) {
+        await this.softDeleteCardFile(this.cardBaseline.get(id).path, backups);
+      }
+      await this.loadMarkdownState();
+    } catch (error) {
+      await this.rollback(backups, createdPaths);
+      await this.loadMarkdownState().catch(() => void 0);
+      throw error;
+    }
   }
   loadFolders() {
     var _a, _b;
@@ -218,33 +540,116 @@ var MarkdownPlannerStore = class {
     };
   }
   async sourceFile(file) {
-    var _a, _b;
+    const content = await this.app.vault.cachedRead(file);
+    const parsed = splitMarkdown(content);
+    this.knownMtimes.set(file.path, file.stat.mtime);
     return {
       path: file.path,
       basename: file.basename,
-      frontmatter: (_b = (_a = this.app.metadataCache.getFileCache(file)) == null ? void 0 : _a.frontmatter) != null ? _b : {},
-      content: await this.app.vault.cachedRead(file)
+      frontmatter: parsed.frontmatter,
+      content
     };
   }
   async loadMarkdownState() {
     const folders = this.loadFolders();
     const files = this.app.vault.getMarkdownFiles();
     const itemFiles = files.filter(
-      (file) => isInside(file, folders.benefitsFolder) || isInside(file, folders.itemsFolder) || isInside(file, folders.activitiesFolder)
+      (file) => isInsidePath(file.path, folders.benefitsFolder) || isInsidePath(file.path, folders.itemsFolder) || isInsidePath(file.path, folders.activitiesFolder)
     );
-    const scheduleFiles = files.filter((file) => isInside(file, folders.schedulesFolder));
-    const cards = (await Promise.all(itemFiles.map((file) => this.sourceFile(file)))).map(cardFromMarkdown).filter((card) => card !== null);
-    const events = (await Promise.all(scheduleFiles.map((file) => this.sourceFile(file)))).map(eventFromMarkdown).filter((event) => event !== null);
-    this.warnDuplicateIds(cards.map((card) => ({ id: card.id, path: card.markdownPath })), "\u5361\u7247");
-    this.warnDuplicateIds(events.map((event) => ({ id: event.id, path: event.markdownPath })), "\u5B89\u6392");
-    const uniqueCards = this.firstById(cards);
+    const scheduleFiles = files.filter((file) => isInsidePath(file.path, folders.schedulesFolder));
+    const itemSources = await Promise.all(itemFiles.map((file) => this.sourceFile(file)));
+    const scheduleSources = await Promise.all(scheduleFiles.map((file) => this.sourceFile(file)));
+    const parsedCards = itemSources.map(cardFromMarkdown).filter((card) => card !== null);
+    const parsedEvents = scheduleSources.map(eventFromMarkdown).filter((event) => event !== null);
+    this.diagnostics = this.collectDiagnostics(itemSources, scheduleSources, parsedCards, parsedEvents);
+    const uniqueCards = this.firstById(parsedCards);
     const cardIds = new Set(uniqueCards.map((card) => card.id));
-    const validEvents = this.firstById(events).filter((event) => {
-      if (cardIds.has(event.cardId)) return true;
-      console.warn(`\u5238\u98DF\u65E5\u5386\uFF1A\u5B89\u6392 ${event.markdownPath} \u7684 subjectId \u65E0\u5BF9\u5E94\u5BF9\u8C61\uFF1A${event.cardId}`);
-      return false;
-    });
+    const validEvents = this.firstById(parsedEvents).filter((event) => cardIds.has(event.cardId));
+    this.cardBaseline = new Map(uniqueCards.map((card) => [
+      card.id,
+      { path: card.markdownPath, fingerprint: cardFingerprint(card) }
+    ]));
+    this.eventBaseline = new Map(validEvents.map((event) => [
+      event.id,
+      { path: event.markdownPath, fingerprint: eventFingerprint(event) }
+    ]));
     return { cards: uniqueCards, events: validEvents };
+  }
+  collectDiagnostics(itemSources, scheduleSources, cards, events) {
+    var _a, _b, _c, _d, _e, _f;
+    const diagnostics = [];
+    for (const source of itemSources) {
+      if (source.frontmatter.couponSchedulerItem === true && !stableId(source.frontmatter)) {
+        diagnostics.push({ key: `missing-card-id:${source.path}`, message: "\u5238\u98DF\u5BF9\u8C61\u7F3A\u5C11\u7A33\u5B9A ID", paths: [source.path] });
+      }
+    }
+    for (const source of scheduleSources) {
+      if (source.frontmatter.couponSchedulerEvent === true && !stringValue2(source.frontmatter.scheduleId)) {
+        diagnostics.push({ key: `missing-schedule-id:${source.path}`, message: "\u5238\u98DF\u5B89\u6392\u7F3A\u5C11 scheduleId", paths: [source.path] });
+      }
+    }
+    const duplicateDiagnostics = (entries, label) => {
+      var _a2;
+      const pathsById = /* @__PURE__ */ new Map();
+      for (const entry of entries) pathsById.set(entry.id, [...(_a2 = pathsById.get(entry.id)) != null ? _a2 : [], entry.markdownPath]);
+      for (const [id, paths] of pathsById) {
+        if (paths.length > 1) diagnostics.push({ key: `duplicate:${label}:${id}`, message: `${label} ID \u91CD\u590D\uFF1A${id}`, paths });
+      }
+    };
+    duplicateDiagnostics(cards, "\u5361\u7247");
+    duplicateDiagnostics(events, "\u5B89\u6392");
+    const cardsById = new Map(this.firstById(cards).map((card) => [card.id, card]));
+    const plannedByCard = /* @__PURE__ */ new Map();
+    for (const event of events) {
+      if (!cardsById.has(event.cardId)) {
+        diagnostics.push({ key: `missing-subject:${event.id}`, message: `\u5B89\u6392 ${event.id} \u7684 subjectId \u627E\u4E0D\u5230\u5BF9\u8C61`, paths: [event.markdownPath] });
+        continue;
+      }
+      if (event.status !== "used") plannedByCard.set(event.cardId, [...(_a = plannedByCard.get(event.cardId)) != null ? _a : [], event]);
+    }
+    for (const [cardId, planned] of plannedByCard) {
+      if (planned.length > 1 && ((_b = cardsById.get(cardId)) == null ? void 0 : _b.entityKind) !== "activity") {
+        diagnostics.push({ key: `multiple-planned:${cardId}`, message: `\u5BF9\u8C61 ${cardId} \u5B58\u5728\u591A\u6761\u6709\u6548\u5B89\u6392`, paths: planned.map((event) => event.markdownPath) });
+      }
+    }
+    for (const source of itemSources) {
+      const frontmatter = source.frontmatter;
+      const ids = stringList((_c = frontmatter.usablePlaceIds) != null ? _c : frontmatter.placeIds);
+      const refs = stringList((_d = frontmatter.usableAt) != null ? _d : frontmatter.placeRefs);
+      if (ids.length !== refs.length) {
+        diagnostics.push({ key: `place-count:${source.path}`, message: `\u5730\u70B9 ID \u4E0E\u53CC\u94FE\u6570\u91CF\u4E0D\u4E00\u81F4`, paths: [source.path] });
+      }
+      refs.forEach((ref, index) => {
+        var _a2, _b2;
+        const target = linkTarget(ref);
+        if (!target) return;
+        const destination = this.app.metadataCache.getFirstLinkpathDest(target, source.path);
+        if (!destination) {
+          diagnostics.push({ key: `missing-place:${source.path}:${index}`, message: `\u5730\u70B9\u53CC\u94FE\u5931\u6548\uFF1A${ref}`, paths: [source.path] });
+          return;
+        }
+        const targetFrontmatter = (_b2 = (_a2 = this.app.metadataCache.getFileCache(destination)) == null ? void 0 : _a2.frontmatter) != null ? _b2 : {};
+        const targetId = stableId(targetFrontmatter);
+        if (ids[index] && targetId && ids[index] !== targetId) {
+          diagnostics.push({ key: `place-mismatch:${source.path}:${index}`, message: `\u5730\u70B9 ID \u4E0E\u53CC\u94FE\u76EE\u6807\u4E0D\u4E00\u81F4`, paths: [source.path, destination.path] });
+        }
+      });
+    }
+    for (const source of scheduleSources) {
+      const subjectId = stringValue2(source.frontmatter.subjectId);
+      const target = linkTarget(source.frontmatter.subjectRef);
+      if (!target) continue;
+      const destination = this.app.metadataCache.getFirstLinkpathDest(target, source.path);
+      if (!destination) {
+        diagnostics.push({ key: `missing-subject-ref:${source.path}`, message: `\u5B89\u6392\u5BF9\u8C61\u53CC\u94FE\u5931\u6548`, paths: [source.path] });
+        continue;
+      }
+      const targetId = stableId((_f = (_e = this.app.metadataCache.getFileCache(destination)) == null ? void 0 : _e.frontmatter) != null ? _f : {});
+      if (subjectId && targetId && subjectId !== targetId) {
+        diagnostics.push({ key: `subject-mismatch:${source.path}`, message: `\u5B89\u6392\u7684 subjectId \u4E0E subjectRef \u4E0D\u4E00\u81F4`, paths: [source.path, destination.path] });
+      }
+    }
+    return diagnostics;
   }
   firstById(entries) {
     const seen = /* @__PURE__ */ new Set();
@@ -254,13 +659,230 @@ var MarkdownPlannerStore = class {
       return true;
     });
   }
-  warnDuplicateIds(entries, label) {
-    var _a;
-    const paths = /* @__PURE__ */ new Map();
-    for (const entry of entries) paths.set(entry.id, [...(_a = paths.get(entry.id)) != null ? _a : [], entry.path]);
-    for (const [id, duplicates] of paths) {
-      if (duplicates.length > 1) console.warn(`\u5238\u98DF\u65E5\u5386\uFF1A\u91CD\u590D${label} ID ${id}`, duplicates);
+  async assertFresh(paths) {
+    const conflicts = [];
+    for (const path of paths) {
+      const file = this.app.vault.getAbstractFileByPath(path);
+      const known = this.knownMtimes.get(path);
+      if (!(file instanceof import_obsidian.TFile) || known === void 0 || file.stat.mtime !== known) conflicts.push(path);
     }
+    if (conflicts.length) {
+      throw new MarkdownWriteConflictError("Markdown \u5728\u7F16\u8F91\u671F\u95F4\u5DF2\u88AB\u5176\u4ED6\u64CD\u4F5C\u4FEE\u6539\uFF0C\u672C\u6B21\u5199\u5165\u5DF2\u53D6\u6D88\u5E76\u91CD\u65B0\u52A0\u8F7D\u3002", conflicts);
+    }
+  }
+  async updateCardFile(path, card, backups) {
+    await this.modifyMarkdown(path, backups, (frontmatter, body) => {
+      const kind = cardKindFromFrontmatter(frontmatter, card);
+      const currentId = stableId(frontmatter);
+      if (currentId && currentId !== stringValue2(card.id)) {
+        throw new MarkdownWriteConflictError(`\u5361\u7247\u7A33\u5B9A ID \u5DF2\u53D8\u5316\uFF1A${path}`, [path]);
+      }
+      this.applyCardFrontmatter(frontmatter, card, kind, false);
+      return { frontmatter, body: replaceMarkdownSection(body, "\u5907\u6CE8", stringValue2(card.notes)) };
+    });
+  }
+  async createCardFile(card) {
+    const folders = this.loadFolders();
+    const kind = cardEntityKind(card.type);
+    const folder = kind === "benefit" ? folders.benefitsFolder : kind === "item" ? folders.itemsFolder : folders.activitiesFolder;
+    await this.ensureFolder(folder);
+    const title = stringValue2(card.title) || "\u65B0\u5361\u7247";
+    const id = stringValue2(card.id);
+    const path = await this.uniquePath(folder, `${safeFileStem(title)}-${id.slice(-6)}.md`);
+    const frontmatter = {};
+    this.applyCardFrontmatter(frontmatter, card, kind, true);
+    const body = `# ${title}
+
+## \u5907\u6CE8
+
+${stringValue2(card.notes)}`.trimEnd() + "\n";
+    const content = buildMarkdown(frontmatter, body);
+    const file = await this.app.vault.create(path, content);
+    this.recordSelfWrite(file.path, content);
+    this.knownMtimes.set(file.path, file.stat.mtime);
+    return { path: file.path, kind };
+  }
+  applyCardFrontmatter(frontmatter, card, kind, isNew) {
+    var _a, _b;
+    const id = stringValue2(card.id);
+    const now = localIsoTimestamp();
+    frontmatter.couponSchedulerItem = true;
+    frontmatter.schemaVersion = Number(frontmatter.schemaVersion) || 1;
+    frontmatter.title = stringValue2(card.title) || "\u65B0\u5361\u7247";
+    frontmatter.calendarType = stringValue2(card.type) || "voucher";
+    frontmatter.sourcePlatform = stringValue2(card.source);
+    frontmatter.purchasePrice = nullableNumber(card.price);
+    frontmatter.faceValue = nullableNumber(card.value);
+    frontmatter.validFrom = nullableString(card.validFrom);
+    frontmatter.validTo = nullableString(card.validTo);
+    frontmatter.desire = Math.max(1, Math.min(5, Math.round(Number(card.desire) || 3)));
+    const hasPlaceRelation = stringList((_b = (_a = frontmatter.usableAt) != null ? _a : frontmatter.placeRefs) != null ? _b : frontmatter.placeRef).length > 0;
+    if (!hasPlaceRelation) frontmatter.locationHint = stringValue2(card.location);
+    frontmatter.tags = isNew ? tagsForNewCard(kind, card.tags) : stringList(card.tags).map((tag) => tag.replace(/^#/, ""));
+    frontmatter.created = frontmatter.created || stringValue2(card.createdAt) || now;
+    frontmatter.updated = now;
+    if (kind === "benefit") {
+      frontmatter.entityType = "benefit";
+      frontmatter.benefitId = id;
+      frontmatter.merchantName = stringValue2(card.merchantName);
+      frontmatter.usableStart = nullableString(card.usableStart);
+      frontmatter.usableEnd = nullableString(card.usableEnd);
+      frontmatter.benefitStatus = factStatus2(kind, card.status);
+      if (isNew) {
+        frontmatter.aliases = [];
+        frontmatter.merchantId = "";
+        frontmatter.merchantRef = "";
+        frontmatter.usablePlaceIds = [];
+        frontmatter.usableAt = [];
+      }
+    } else if (kind === "item") {
+      frontmatter.recordType = "coupon-calendar-item";
+      frontmatter.itemId = id;
+      frontmatter.merchantName = stringValue2(card.merchantName);
+      frontmatter.usableStart = nullableString(card.usableStart);
+      frontmatter.usableEnd = nullableString(card.usableEnd);
+      frontmatter.itemStatus = factStatus2(kind, card.status);
+      if (isNew) {
+        frontmatter.aliases = [];
+        frontmatter.placeIds = [];
+        frontmatter.placeRefs = [];
+      }
+    } else {
+      frontmatter.entityType = "activity";
+      frontmatter.activityId = id;
+      frontmatter.repeatRule = "weekly";
+      frontmatter.repeatWeekday = card.repeatWeekday === "" || card.repeatWeekday === void 0 ? null : Number(card.repeatWeekday);
+      frontmatter.defaultStart = nullableString(card.usableStart);
+      frontmatter.defaultEnd = nullableString(card.usableEnd);
+      frontmatter.activityStatus = factStatus2(kind, card.status);
+      if (isNew) {
+        frontmatter.aliases = [];
+        frontmatter.placeId = "";
+        frontmatter.placeRef = "";
+      }
+    }
+  }
+  async updateEventFile(path, event, backups) {
+    await this.modifyMarkdown(path, backups, (frontmatter, body) => {
+      if (stringValue2(frontmatter.scheduleId) !== stringValue2(event.id)) {
+        throw new MarkdownWriteConflictError(`\u5B89\u6392\u7A33\u5B9A ID \u5DF2\u53D8\u5316\uFF1A${path}`, [path]);
+      }
+      frontmatter.date = stringValue2(event.date);
+      frontmatter.start = stringValue2(event.start);
+      frontmatter.end = stringValue2(event.end);
+      frontmatter.eventStatus = event.status === "used" ? "done" : "planned";
+      frontmatter.updated = localIsoTimestamp();
+      return { frontmatter, body };
+    });
+  }
+  async createEventFile(event, card) {
+    const folder = this.loadFolders().schedulesFolder;
+    await this.ensureFolder(folder);
+    const title = stringValue2(card.title) || "\u672A\u547D\u540D\u5361\u7247";
+    const id = stringValue2(event.id);
+    const date = stringValue2(event.date);
+    const path = await this.uniquePath(folder, `${safeFileStem(`${date}-${title}`)}-${id.slice(-6)}.md`);
+    const cardPath = stringValue2(card.markdownPath);
+    if (!cardPath) throw new MarkdownWriteConflictError(`\u65E0\u6CD5\u4E3A\u5B89\u6392 ${id} \u5EFA\u7ACB\u5BF9\u8C61\u53CC\u94FE\u3002`);
+    const kind = cardEntityKind(card.type);
+    const now = localIsoTimestamp();
+    const frontmatter = {
+      couponSchedulerEvent: true,
+      recordType: "coupon-calendar-schedule",
+      schemaVersion: 1,
+      scheduleId: id,
+      subjectKind: kind,
+      subjectId: stringValue2(card.id),
+      subjectRef: wikilink(cardPath, title),
+      date,
+      start: stringValue2(event.start),
+      end: stringValue2(event.end),
+      eventStatus: event.status === "used" ? "done" : "planned",
+      placeId: "",
+      placeRef: "",
+      taskId: "",
+      taskRef: "",
+      created: stringValue2(event.createdAt) || now,
+      updated: now,
+      tags: ["\u8BB0\u5F55/\u5238\u98DF\u5B89\u6392"]
+    };
+    const content = buildMarkdown(frontmatter, `# ${date} \u4F7F\u7528${title}
+
+## \u5B89\u6392\u5907\u6CE8
+`);
+    const file = await this.app.vault.create(path, content);
+    this.recordSelfWrite(file.path, content);
+    this.knownMtimes.set(file.path, file.stat.mtime);
+    return file;
+  }
+  async cancelEventFile(path, backups) {
+    await this.modifyMarkdown(path, backups, (frontmatter, body) => {
+      frontmatter.eventStatus = "cancelled";
+      frontmatter.updated = localIsoTimestamp();
+      return { frontmatter, body };
+    });
+  }
+  async softDeleteCardFile(path, backups) {
+    await this.modifyMarkdown(path, backups, (frontmatter, body) => {
+      frontmatter.couponSchedulerItem = false;
+      frontmatter.archivedByCouponScheduler = true;
+      frontmatter.deletedAt = localIsoTimestamp();
+      frontmatter.updated = localIsoTimestamp();
+      return { frontmatter, body };
+    });
+  }
+  async modifyMarkdown(path, backups, updater) {
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof import_obsidian.TFile)) throw new MarkdownWriteConflictError(`\u627E\u4E0D\u5230 Markdown\uFF1A${path}`, [path]);
+    const original = await this.app.vault.cachedRead(file);
+    if (!backups.has(path)) backups.set(path, original);
+    const parsed = splitMarkdown(original);
+    const next = updater({ ...parsed.frontmatter }, parsed.body);
+    const content = buildMarkdown(next.frontmatter, next.body);
+    if (content === original) return;
+    await this.app.vault.modify(file, content);
+    this.recordSelfWrite(path, content);
+    this.knownMtimes.set(path, file.stat.mtime);
+  }
+  async rollback(backups, createdPaths) {
+    for (const [path, content] of [...backups.entries()].reverse()) {
+      const file = this.app.vault.getAbstractFileByPath(path);
+      if (!(file instanceof import_obsidian.TFile)) continue;
+      await this.app.vault.modify(file, content).catch(() => void 0);
+      this.recordSelfWrite(path, content);
+      this.knownMtimes.set(path, file.stat.mtime);
+    }
+    for (const path of [...createdPaths].reverse()) {
+      const file = this.app.vault.getAbstractFileByPath(path);
+      if (!(file instanceof import_obsidian.TFile)) continue;
+      this.selfWrites.set(path, { hash: null, until: Date.now() + SELF_WRITE_TTL_MS });
+      await this.app.vault.trash(file, true).catch(() => void 0);
+    }
+  }
+  async ensureFolder(path) {
+    const normalized = (0, import_obsidian.normalizePath)(path);
+    const segments = normalized.split("/");
+    let current = "";
+    for (const segment of segments) {
+      current = current ? `${current}/${segment}` : segment;
+      const existing = this.app.vault.getAbstractFileByPath(current);
+      if (existing instanceof import_obsidian.TFolder) continue;
+      if (existing) throw new Error(`\u65E0\u6CD5\u521B\u5EFA\u76EE\u5F55\uFF0C\u8DEF\u5F84\u5DF2\u88AB\u6587\u4EF6\u5360\u7528\uFF1A${current}`);
+      await this.app.vault.createFolder(current);
+    }
+  }
+  async uniquePath(folder, fileName) {
+    const stem = fileName.replace(/\.md$/i, "");
+    let candidate = (0, import_obsidian.normalizePath)(`${folder}/${fileName}`);
+    let suffix = 2;
+    while (this.app.vault.getAbstractFileByPath(candidate)) {
+      candidate = (0, import_obsidian.normalizePath)(`${folder}/${stem}-${suffix}.md`);
+      suffix += 1;
+    }
+    return candidate;
+  }
+  recordSelfWrite(path, content) {
+    this.selfWrites.set(path, { hash: contentHash(content), until: Date.now() + SELF_WRITE_TTL_MS });
   }
 };
 
@@ -329,6 +951,7 @@ async function mountCouponCalendar(container, bridge) {
   let resizeObserver = null;
   let mapRenderToken = 0;
   let placeSearch = { cardId: null, loading: false, error: "", results: [] };
+  let externalReloadQueue = Promise.resolve();
   const saved = await bridge.loadState();
   let state = normalizeState(saved || createDefaultState());
   syncResponsiveLayout();
@@ -336,11 +959,21 @@ async function mountCouponCalendar(container, bridge) {
   resizeObserver.observe(layoutElement);
   bindEvents();
   render();
+  const unsubscribeChanges = typeof bridge.subscribeToChanges === "function" ? bridge.subscribeToChanges(() => {
+    externalReloadQueue = externalReloadQueue.catch(() => void 0).then(async () => {
+      if (disposed) return;
+      const refreshed = await bridge.reloadState(state);
+      if (disposed) return;
+      state = normalizeState(refreshed || createDefaultState());
+      render();
+    }).catch((error) => console.error("\u5238\u98DF\u65E5\u5386\u5916\u90E8\u5237\u65B0\u5931\u8D25", error));
+  }) : () => void 0;
   return () => {
     if (disposed) return;
     disposed = true;
     resizeObserver == null ? void 0 : resizeObserver.disconnect();
     resizeObserver = null;
+    unsubscribeChanges();
     root.classList.remove("is-compact-layout", "is-narrow-layout");
   };
   function syncResponsiveLayout() {
@@ -1221,6 +1854,20 @@ ${group.map(({ card, point: mapPoint }) => `${card.title || "\u672A\u547D\u540D\
   }
   function updateCardFromInput(cardId, name, value) {
     var _a, _b;
+    const currentCard = getCard(cardId);
+    if (name === "type" && currentCard && cardEntityKind(currentCard.type) !== cardEntityKind(value)) {
+      if (currentCard.markdownPath) {
+        window.alert("\u5DF2\u4FDD\u5B58\u5361\u7247\u4E0D\u80FD\u76F4\u63A5\u8DE8\u5B9E\u4F53\u7C7B\u522B\u4FEE\u6539\u3002\u8BF7\u65B0\u5EFA\u76EE\u6807\u7C7B\u578B\u540E\u518D\u8FC1\u79FB\u5185\u5BB9\uFF0C\u907F\u514D\u7A33\u5B9A ID \u5931\u6548\u3002");
+        renderDetailPanel();
+        return;
+      }
+      const nextId = createStableId(cardIdPrefix(value));
+      state.events.forEach((event) => {
+        if (event.cardId === currentCard.id) event.cardId = nextId;
+      });
+      currentCard.id = nextId;
+      state.selectedCardId = nextId;
+    }
     const patch = {};
     if (name === "desire") {
       patch[name] = Number(value);
@@ -1332,7 +1979,7 @@ ${group.map(({ card, point: mapPoint }) => `${card.title || "\u672A\u547D\u540D\
     if (!sourceCard) return;
     const duplicate = {
       ...sourceCard,
-      id: createId(),
+      id: createStableId(cardIdPrefix(sourceCard.type)),
       title: `${sourceCard.title || "\u672A\u547D\u540D\u5361\u7247"} \u526F\u672C`,
       tags: [...sourceCard.tags || []],
       status: "unscheduled",
@@ -1455,7 +2102,7 @@ ${group.map(({ card, point: mapPoint }) => `${card.title || "\u672A\u547D\u540D\
       state.selectedEventId = existing.id;
     } else {
       const event = {
-        id: createId(),
+        id: createStableId("sch"),
         cardId,
         date,
         start,
@@ -1495,7 +2142,7 @@ ${group.map(({ card, point: mapPoint }) => `${card.title || "\u672A\u547D\u540D\
   function addCard() {
     const today = /* @__PURE__ */ new Date();
     const card = {
-      id: createId(),
+      id: createStableId("ben"),
       type: "voucher",
       title: "\u65B0\u5361\u7247",
       merchantName: "",
@@ -1725,25 +2372,13 @@ ${group.map(({ card, point: mapPoint }) => `${card.title || "\u672A\u547D\u540D\
     });
     el.addCardButton.addEventListener("click", addCard);
     el.exportButton.addEventListener("click", exportData);
-    el.importButton.addEventListener("click", () => el.importFile.click());
+    el.importButton.disabled = true;
+    el.importButton.title = "Markdown \u6A21\u5F0F\u4E0D\u652F\u6301\u76F4\u63A5\u8986\u76D6\u5F0F\u5BFC\u5165\uFF1B\u8BF7\u4F7F\u7528\u72EC\u7ACB\u8FC1\u79FB\u5DE5\u5177\u3002";
     el.inboxPageButtons.forEach((button) => {
       button.addEventListener("click", () => {
         state.inboxPage = button.dataset.inboxPage;
         commit();
       });
-    });
-    el.importFile.addEventListener("change", async () => {
-      var _a;
-      const file = (_a = el.importFile.files) == null ? void 0 : _a[0];
-      if (!file) return;
-      try {
-        await importData(file);
-      } catch (error) {
-        window.alert("\u5BFC\u5165\u5931\u8D25\uFF1A\u8BF7\u786E\u8BA4 JSON \u6587\u4EF6\u683C\u5F0F\u6B63\u786E\u3002");
-        console.error(error);
-      } finally {
-        el.importFile.value = "";
-      }
     });
     el.typeFilter.addEventListener("change", () => {
       state.filters.type = el.typeFilter.value;
@@ -2092,6 +2727,11 @@ var CouponSchedulerPlugin = class extends import_obsidian2.Plugin {
   constructor() {
     super(...arguments);
     this.saveQueue = Promise.resolve();
+    this.pendingPlannerState = null;
+    this.saveTimer = null;
+    this.refreshTimer = null;
+    this.changeListeners = /* @__PURE__ */ new Set();
+    this.activeDiagnosticKeys = /* @__PURE__ */ new Set();
     this.geocodeQueue = Promise.resolve();
     this.geocodeCache = /* @__PURE__ */ new Map();
     this.lastGeocodeAt = 0;
@@ -2107,6 +2747,15 @@ var CouponSchedulerPlugin = class extends import_obsidian2.Plugin {
       name: "\u6253\u5F00\u5238\u98DF\u65E5\u5386",
       callback: () => void this.activateView()
     });
+    this.registerEvent(this.app.vault.on("create", (file) => void this.handleVaultChange(file)));
+    this.registerEvent(this.app.vault.on("modify", (file) => void this.handleVaultChange(file)));
+    this.registerEvent(this.app.vault.on("delete", (file) => void this.handleVaultChange(file)));
+    this.registerEvent(this.app.vault.on("rename", (file, oldPath) => void this.handleVaultChange(file, oldPath)));
+  }
+  onunload() {
+    if (this.saveTimer !== null) window.clearTimeout(this.saveTimer);
+    if (this.refreshTimer !== null) window.clearTimeout(this.refreshTimer);
+    void this.flushPlannerState();
   }
   async activateView() {
     const existing = this.app.workspace.getLeavesOfType(VIEW_TYPE)[0];
@@ -2120,7 +2769,14 @@ var CouponSchedulerPlugin = class extends import_obsidian2.Plugin {
     var _a, _b;
     const saved = await this.loadData();
     const uiState = (_b = (_a = saved == null ? void 0 : saved.ui) != null ? _a : saved == null ? void 0 : saved.state) != null ? _b : null;
-    return this.markdownStore.loadPlannerState(uiState);
+    const state = await this.markdownStore.loadPlannerState(uiState);
+    this.reportDiagnostics();
+    return state;
+  }
+  async reloadPlannerState(currentState) {
+    const state = await this.markdownStore.loadPlannerState(extractUiState(currentState));
+    this.reportDiagnostics();
+    return state;
   }
   async openMarkdown(path) {
     const file = this.app.vault.getAbstractFileByPath(path);
@@ -2131,11 +2787,46 @@ var CouponSchedulerPlugin = class extends import_obsidian2.Plugin {
     await this.app.workspace.getLeaf("tab").openFile(file);
   }
   savePlannerState(state) {
+    this.pendingPlannerState = state;
+    if (this.saveTimer !== null) window.clearTimeout(this.saveTimer);
+    this.saveTimer = window.setTimeout(() => {
+      this.saveTimer = null;
+      void this.flushPlannerState();
+    }, 350);
+  }
+  async flushPlannerState() {
+    if (this.saveTimer !== null) {
+      window.clearTimeout(this.saveTimer);
+      this.saveTimer = null;
+    }
+    const state = this.pendingPlannerState;
+    if (!state) {
+      await this.saveQueue;
+      return;
+    }
+    this.pendingPlannerState = null;
     const snapshot = extractUiState(state);
-    this.saveQueue = this.saveQueue.catch(() => void 0).then(() => this.saveData({ schemaVersion: 4, ui: snapshot })).catch((error) => {
-      console.error("\u5238\u98DF\u65E5\u5386\u4FDD\u5B58\u5931\u8D25", error);
-      new import_obsidian2.Notice("\u5238\u98DF\u65E5\u5386\u4FDD\u5B58\u5931\u8D25\uFF0C\u8BF7\u67E5\u770B\u5F00\u53D1\u8005\u63A7\u5236\u53F0");
+    this.saveQueue = this.saveQueue.catch(() => void 0).then(async () => {
+      await this.markdownStore.syncPlannerState(state);
+      await this.saveData({ schemaVersion: 5, ui: snapshot });
+      this.reportDiagnostics();
+    }).catch((error) => {
+      console.error("\u5238\u98DF\u65E5\u5386 Markdown \u5199\u5165\u5931\u8D25", error);
+      if (error instanceof MarkdownWriteConflictError) {
+        const detail = error.paths.length ? `\uFF1A${error.paths.slice(0, 2).join("\u3001")}` : "";
+        new import_obsidian2.Notice(`\u5238\u98DF\u65E5\u5386\uFF1A\u68C0\u6D4B\u5230\u5E76\u53D1\u4FEE\u6539\uFF0C\u672A\u8986\u76D6\u5916\u90E8\u5185\u5BB9${detail}`, 8e3);
+      } else {
+        new import_obsidian2.Notice("\u5238\u98DF\u65E5\u5386\u5199\u5165\u5931\u8D25\uFF0C\u5DF2\u5C1D\u8BD5\u6062\u590D\u539F\u6587\u4EF6\uFF1B\u754C\u9762\u5C06\u91CD\u65B0\u52A0\u8F7D\u3002", 8e3);
+      }
+      this.emitPlannerChange();
+    }).finally(() => {
+      if (this.pendingPlannerState) this.savePlannerState(this.pendingPlannerState);
     });
+    await this.saveQueue;
+  }
+  subscribePlannerChanges(listener) {
+    this.changeListeners.add(listener);
+    return () => this.changeListeners.delete(listener);
   }
   async searchPlace(query, endpoint) {
     const normalizedQuery = query.trim();
@@ -2182,6 +2873,31 @@ var CouponSchedulerPlugin = class extends import_obsidian2.Plugin {
     this.geocodeQueue = work.then(() => void 0, () => void 0);
     return work;
   }
+  async handleVaultChange(file, oldPath) {
+    const paths = [file.path, oldPath].filter((path) => Boolean(path));
+    if (!paths.some((path) => this.markdownStore.isManagedPath(path))) return;
+    if (file instanceof import_obsidian2.TFile && await this.markdownStore.isSelfAuthoredChange(file)) return;
+    if (!(file instanceof import_obsidian2.TFile) && await this.markdownStore.isSelfAuthoredChange(file.path)) return;
+    if (this.refreshTimer !== null) window.clearTimeout(this.refreshTimer);
+    this.refreshTimer = window.setTimeout(() => {
+      this.refreshTimer = null;
+      void this.flushPlannerState().finally(() => this.emitPlannerChange());
+    }, 650);
+  }
+  emitPlannerChange() {
+    for (const listener of this.changeListeners) listener();
+  }
+  reportDiagnostics() {
+    const diagnostics = this.markdownStore.getDiagnostics();
+    const nextKeys = new Set(diagnostics.map((item) => item.key));
+    for (const diagnostic of diagnostics) {
+      if (this.activeDiagnosticKeys.has(diagnostic.key)) continue;
+      const path = diagnostic.paths[0] ? `\uFF08${diagnostic.paths[0]}\uFF09` : "";
+      new import_obsidian2.Notice(`\u5238\u98DF\u65E5\u5386\u6570\u636E\u51B2\u7A81\uFF1A${diagnostic.message}${path}`, 1e4);
+      console.warn("\u5238\u98DF\u65E5\u5386\u6570\u636E\u51B2\u7A81", diagnostic);
+    }
+    this.activeDiagnosticKeys = nextKeys;
+  }
 };
 var CouponSchedulerView = class extends import_obsidian2.ItemView {
   constructor(leaf, plugin) {
@@ -2205,6 +2921,8 @@ var CouponSchedulerView = class extends import_obsidian2.ItemView {
     this.cleanup = await mountCouponCalendar(this.contentEl, {
       loadState: () => this.plugin.loadPlannerState(),
       saveState: (state) => this.plugin.savePlannerState(state),
+      reloadState: (state) => this.plugin.reloadPlannerState(state),
+      subscribeToChanges: (listener) => this.plugin.subscribePlannerChanges(listener),
       searchPlace: (query, endpoint) => this.plugin.searchPlace(query, endpoint),
       openMarkdown: (path) => this.plugin.openMarkdown(path),
       layoutElement: this.containerEl
@@ -2212,6 +2930,7 @@ var CouponSchedulerView = class extends import_obsidian2.ItemView {
   }
   async onClose() {
     var _a;
+    await this.plugin.flushPlannerState();
     (_a = this.cleanup) == null ? void 0 : _a.call(this);
     this.cleanup = null;
     this.contentEl.removeClass("coupon-scheduler-view");

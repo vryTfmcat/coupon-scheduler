@@ -11,6 +11,7 @@ export interface MarkdownSourceFile {
 
 export interface PlannerCard {
   id: string;
+  entityKind: "benefit" | "item" | "activity";
   type: UiCardType;
   title: string;
   merchantName: string;
@@ -35,6 +36,8 @@ export interface PlannerCard {
 export interface PlannerEvent {
   id: string;
   cardId: string;
+  subjectKind: "benefit" | "item" | "activity";
+  subjectRef: string;
   date: string;
   start: string;
   end: string;
@@ -127,6 +130,12 @@ function stableCardId(frontmatter: Record<string, unknown>): string {
   return stringValue(frontmatter.benefitId ?? frontmatter.itemId ?? frontmatter.activityId);
 }
 
+function entityKind(frontmatter: Record<string, unknown>): PlannerCard["entityKind"] {
+  if (frontmatter.entityType === "activity" || frontmatter.activityId) return "activity";
+  if (frontmatter.recordType === "coupon-calendar-item" || frontmatter.itemId) return "item";
+  return "benefit";
+}
+
 export function cardFromMarkdown(file: MarkdownSourceFile): PlannerCard | null {
   const { frontmatter } = file;
   if (frontmatter.couponSchedulerItem !== true) return null;
@@ -136,11 +145,12 @@ export function cardFromMarkdown(file: MarkdownSourceFile): PlannerCard | null {
   const type = uiCardType(frontmatter.calendarType);
   const location = wikilinkLabel(
     frontmatter.usableAt ?? frontmatter.placeRefs ?? frontmatter.placeRef,
-  );
+  ) || stringValue(frontmatter.locationHint);
   const repeatWeekday = stringValue(frontmatter.repeatWeekday);
 
   return {
     id,
+    entityKind: entityKind(frontmatter),
     type,
     title: stringValue(frontmatter.title) || file.basename,
     merchantName: stringValue(frontmatter.merchantName),
@@ -174,6 +184,10 @@ export function eventFromMarkdown(file: MarkdownSourceFile): PlannerEvent | null
   return {
     id,
     cardId,
+    subjectKind: ["benefit", "item", "activity"].includes(stringValue(frontmatter.subjectKind))
+      ? stringValue(frontmatter.subjectKind) as PlannerEvent["subjectKind"]
+      : "benefit",
+    subjectRef: stringValue(frontmatter.subjectRef),
     date: stringValue(frontmatter.date),
     start: stringValue(frontmatter.start),
     end: stringValue(frontmatter.end),

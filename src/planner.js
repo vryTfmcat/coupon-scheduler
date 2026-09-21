@@ -1,3 +1,5 @@
+import { cardEntityKind, cardIdPrefix, createStableId } from "./writeHelpers";
+
 const typeMeta = {
   redPacket: { label: "红包", color: "#b94a3d" },
   voucher: { label: "团购券", color: "#336a9c" },
@@ -67,6 +69,7 @@ export async function mountCouponCalendar(container, bridge) {
   let resizeObserver = null;
   let mapRenderToken = 0;
   let placeSearch = { cardId: null, loading: false, error: "", results: [] };
+  let externalReloadQueue = Promise.resolve();
   const saved = await bridge.loadState();
   let state = normalizeState(saved || createDefaultState());
   syncResponsiveLayout();
@@ -74,12 +77,27 @@ export async function mountCouponCalendar(container, bridge) {
   resizeObserver.observe(layoutElement);
   bindEvents();
   render();
+  const unsubscribeChanges = typeof bridge.subscribeToChanges === "function"
+    ? bridge.subscribeToChanges(() => {
+      externalReloadQueue = externalReloadQueue
+        .catch(() => undefined)
+        .then(async () => {
+          if (disposed) return;
+          const refreshed = await bridge.reloadState(state);
+          if (disposed) return;
+          state = normalizeState(refreshed || createDefaultState());
+          render();
+        })
+        .catch((error) => console.error("券食日历外部刷新失败", error));
+    })
+    : () => undefined;
 
   return () => {
     if (disposed) return;
     disposed = true;
     resizeObserver?.disconnect();
     resizeObserver = null;
+    unsubscribeChanges();
     root.classList.remove("is-compact-layout", "is-narrow-layout");
   };
 
@@ -1055,6 +1073,20 @@ function bindDetailForm(card, event) {
 }
 
 function updateCardFromInput(cardId, name, value) {
+  const currentCard = getCard(cardId);
+  if (name === "type" && currentCard && cardEntityKind(currentCard.type) !== cardEntityKind(value)) {
+    if (currentCard.markdownPath) {
+      window.alert("已保存卡片不能直接跨实体类别修改。请新建目标类型后再迁移内容，避免稳定 ID 失效。");
+      renderDetailPanel();
+      return;
+    }
+    const nextId = createStableId(cardIdPrefix(value));
+    state.events.forEach((event) => {
+      if (event.cardId === currentCard.id) event.cardId = nextId;
+    });
+    currentCard.id = nextId;
+    state.selectedCardId = nextId;
+  }
   const patch = {};
   if (name === "desire") {
     patch[name] = Number(value);
@@ -1179,7 +1211,7 @@ function duplicateCard(cardId) {
 
   const duplicate = {
     ...sourceCard,
-    id: createId(),
+    id: createStableId(cardIdPrefix(sourceCard.type)),
     title: `${sourceCard.title || "未命名卡片"} 副本`,
     tags: [...(sourceCard.tags || [])],
     status: "unscheduled",
@@ -1325,7 +1357,7 @@ function scheduleCard(cardId, date, start, end) {
     state.selectedEventId = existing.id;
   } else {
     const event = {
-      id: createId(),
+      id: createStableId("sch"),
       cardId,
       date,
       start,
@@ -1370,7 +1402,7 @@ function selectEvent(eventId) {
 function addCard() {
   const today = new Date();
   const card = {
-    id: createId(),
+    id: createStableId("ben"),
     type: "voucher",
     title: "新卡片",
     merchantName: "",
@@ -1644,24 +1676,13 @@ function bindEvents() {
 
   el.addCardButton.addEventListener("click", addCard);
   el.exportButton.addEventListener("click", exportData);
-  el.importButton.addEventListener("click", () => el.importFile.click());
+  el.importButton.disabled = true;
+  el.importButton.title = "Markdown 模式不支持直接覆盖式导入；请使用独立迁移工具。";
   el.inboxPageButtons.forEach((button) => {
     button.addEventListener("click", () => {
       state.inboxPage = button.dataset.inboxPage;
       commit();
     });
-  });
-  el.importFile.addEventListener("change", async () => {
-    const file = el.importFile.files?.[0];
-    if (!file) return;
-    try {
-      await importData(file);
-    } catch (error) {
-      window.alert("导入失败：请确认 JSON 文件格式正确。");
-      console.error(error);
-    } finally {
-      el.importFile.value = "";
-    }
   });
 
   el.typeFilter.addEventListener("change", () => {

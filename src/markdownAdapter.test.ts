@@ -80,6 +80,7 @@ test("derives scheduled state without changing recurring activities", () => {
 test("merges Markdown business data with UI-only state", () => {
   const card: PlannerCard = {
     id: "benefit",
+    entityKind: "benefit",
     type: "voucher",
     title: "券",
     merchantName: "",
