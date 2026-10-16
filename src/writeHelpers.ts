@@ -123,6 +123,7 @@ export function eventFingerprint(event: Record<string, unknown>): string {
     date: event.date,
     start: event.start,
     end: event.end,
+    timeUnknown: event.timeUnknown === true,
     status: event.status === "used" ? "used" : "planned",
   });
 }

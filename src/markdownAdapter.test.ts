@@ -128,3 +128,14 @@ test("link and section helpers support Obsidian Markdown", () => {
   assert.equal(wikilinkLabel("[[50_实体/地点/外部地点/公园-abc]]"), "公园-abc");
   assert.equal(extractSection("# 标题\n\n## 备注\n第一行\n\n## 其他\n第二行", "备注"), "第一行");
 });
+
+
+test("explicit unknown schedule times remain unknown instead of midnight", () => {
+  const event = eventFromMarkdown({ path: "synthetic.md", basename: "synthetic", content: "",
+    frontmatter: { couponSchedulerEvent: true, scheduleId: "sch_unknown", subjectId: "ben_unknown",
+      date: "2026-10-06", timeUnknown: true, eventStatus: "done" } });
+  assert.equal(event?.timeUnknown, true);
+  assert.equal(event?.start, "");
+  assert.equal(event?.end, "");
+  assert.equal(event?.status, "used");
+});

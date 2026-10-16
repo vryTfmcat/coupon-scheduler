@@ -54,3 +54,9 @@ test("fingerprints ignore derived schedule status and timestamps", () => {
 test("local timestamps carry an explicit timezone", () => {
   assert.match(localIsoTimestamp(new Date()), /[+-]\d{2}:\d{2}$/);
 });
+
+
+test("changing explicit unknown-time status is a durable schedule change", () => {
+  const event = {id:"sch_unknown",start:"",end:"",timeUnknown:true};
+  assert.notEqual(eventFingerprint(event), eventFingerprint({...event,timeUnknown:false}));
+});

@@ -356,7 +356,10 @@ function renderCalendar() {
     }
   }
 
-  replaceWithHtml(el.calendarGrid, headerHtml + bodyParts.join(""));
+  const unknownRows = days.some(day => state.events.some(event => event.timeUnknown && event.date === toDateInputValue(day)))
+    ? `<div class="hour-label">未记时</div>` + days.map(day => `<div class="date-only-events">${renderMonthEvents(state.events.filter(event => event.timeUnknown && event.date === toDateInputValue(day)))}</div>`).join("")
+    : "";
+  replaceWithHtml(el.calendarGrid, headerHtml + unknownRows + bodyParts.join(""));
 
   el.calendarGrid.querySelectorAll(".calendar-cell").forEach((cell) => {
     cell.addEventListener("dragover", handleCalendarDragOver);
@@ -365,7 +368,7 @@ function renderCalendar() {
     cell.addEventListener("click", handleCalendarCellClick);
   });
 
-  el.calendarGrid.querySelectorAll(".event-chip").forEach((node) => {
+  el.calendarGrid.querySelectorAll(".event-chip, .date-only-events .month-event").forEach((node) => {
     node.addEventListener("dragstart", handleEventDragStart);
     node.addEventListener("click", (event) => {
       event.stopPropagation();
@@ -629,7 +632,7 @@ function paintFixedMap(canvas, cards) {
 
 function renderEventsForCell(date, hour) {
   const events = state.events
-    .filter((event) => event.date === date && Math.floor(toMinutes(event.start) / 60) === hour)
+    .filter((event) => !event.timeUnknown && event.date === date && Math.floor(toMinutes(event.start) / 60) === hour)
     .sort((a, b) => toMinutes(a.start) - toMinutes(b.start));
 
   return events
@@ -734,7 +737,7 @@ function renderMonthEvents(events) {
           data-status="${escapeAttribute(event.status || "")}"
           draggable="${event.status === "used" ? "false" : "true"}"
           title="${escapeAttribute(formatIssues(issues) || card.title)}">
-          <span class="month-event-time">${escapeHtml(event.start)}</span>
+          <span class="month-event-time">${escapeHtml(event.timeUnknown ? "未记时" : event.start)}</span>
           <span class="month-event-title">${escapeHtml(getCardDisplayTitle(card))}</span>
         </article>
       `;
@@ -880,6 +883,7 @@ function renderDetailPanel() {
 
 function renderEventEditor(event) {
   return `
+    ${event.timeUnknown ? `<div class="meta-line">时间未记录；不进行具体时段冲突判断。</div>` : ""}
     <div class="field-grid">
       <div class="field full">
         <div class="field-title">日历安排</div>
@@ -1168,7 +1172,10 @@ function updateEventFromInput(eventId, name, value) {
   if (name === "eventStart") event.start = value;
   if (name === "eventEnd") event.end = value;
 
-  if (toMinutes(event.end) <= toMinutes(event.start)) {
+  if (["eventStart", "eventEnd"].includes(name) && event.timeUnknown) {
+    event.timeUnknown = !(event.start && event.end);
+  }
+  if (!event.timeUnknown && toMinutes(event.end) <= toMinutes(event.start)) {
     event.end = minutesToTime(Math.min(23 * 60 + 59, toMinutes(event.start) + 60));
   }
 
@@ -1354,6 +1361,7 @@ function scheduleCard(cardId, date, start, end) {
   const existing = isRecurringCard(card) ? null : getEventByCardId(cardId);
   if (existing) {
     Object.assign(existing, { date, start, end });
+    if (start && end) existing.timeUnknown = false;
     state.selectedEventId = existing.id;
   } else {
     const event = {
@@ -1378,6 +1386,7 @@ function moveEvent(eventId, date, start, end) {
   const event = getEvent(eventId);
   if (!event || event.status === "used") return;
   Object.assign(event, { date, start, end });
+  if (start && end) event.timeUnknown = false;
   state.selectedEventId = eventId;
   state.selectedCardId = event.cardId;
   commit();
@@ -1598,7 +1607,7 @@ function getEventIssues(event) {
   const card = getCard(event.cardId);
   if (!card) return [createIssue("找不到卡片", "error")];
   if (isAlwaysUsableCard(card)) {
-    return toMinutes(event.end) <= toMinutes(event.start) ? [createIssue("结束时间异常", "error")] : [];
+    return !event.timeUnknown && toMinutes(event.end) <= toMinutes(event.start) ? [createIssue("结束时间异常", "error")] : [];
   }
 
   const issues = [];
@@ -1607,12 +1616,14 @@ function getEventIssues(event) {
   const usableStart = toMinutes(card.usableStart || "00:00");
   const usableEnd = toMinutes(card.usableEnd || "23:59");
 
-  if (event.date < card.validFrom) issues.push(createIssue("早于有效期", "error"));
-  if (event.date > card.validTo) {
+  if (card.validFrom && event.date < card.validFrom) issues.push(createIssue("早于有效期", "error"));
+  if (card.validTo && event.date > card.validTo) {
     issues.push(createIssue(card.type === "food" ? "晚于保质期" : "晚于有效期", "error"));
   }
-  if (start < usableStart || end > usableEnd) issues.push(createIssue("不在可用时段", "error"));
-  if (end <= start) issues.push(createIssue("结束时间异常", "error"));
+  if (!event.timeUnknown) {
+    if (start < usableStart || end > usableEnd) issues.push(createIssue("不在可用时段", "error"));
+    if (end <= start) issues.push(createIssue("结束时间异常", "error"));
+  }
 
   return issues;
 }
