@@ -1427,3 +1427,6 @@ button:disabled {
 .coupon-scheduler-view.is-narrow-layout .range-row {
   grid-template-columns: 1fr;
 }
+
+/* Date-only records are not placed at an invented midnight slot. */
+.date-only-events { padding: 6px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); }

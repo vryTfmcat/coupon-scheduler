@@ -142,6 +142,7 @@ function eventFromMarkdown(file) {
     date: stringValue(frontmatter.date),
     start: stringValue(frontmatter.start),
     end: stringValue(frontmatter.end),
+    timeUnknown: frontmatter.timeUnknown === true,
     status: status === "done" ? "used" : void 0,
     createdAt: stringValue(frontmatter.created),
     updatedAt: stringValue(frontmatter.updated),
@@ -301,6 +302,7 @@ function eventFingerprint(event) {
     date: event.date,
     start: event.start,
     end: event.end,
+    timeUnknown: event.timeUnknown === true,
     status: event.status === "used" ? "used" : "planned"
   });
 }
@@ -711,8 +713,7 @@ var MarkdownPlannerStore = class {
 
 ${stringValue2(card.notes)}`.trimEnd() + "\n";
     const content = buildMarkdown(frontmatter, body);
-    const file = await this.app.vault.create(path, content);
-    this.recordSelfWrite(file.path, content);
+    const file = await this.selfAuthoredWrite(path, content, () => this.app.vault.create(path, content));
     this.knownMtimes.set(file.path, file.stat.mtime);
     return { path: file.path, kind };
   }
@@ -784,6 +785,7 @@ ${stringValue2(card.notes)}`.trimEnd() + "\n";
       frontmatter.date = stringValue2(event.date);
       frontmatter.start = stringValue2(event.start);
       frontmatter.end = stringValue2(event.end);
+      frontmatter.timeUnknown = event.timeUnknown === true;
       frontmatter.eventStatus = event.status === "used" ? "done" : "planned";
       frontmatter.updated = localIsoTimestamp();
       return { frontmatter, body };
@@ -811,6 +813,7 @@ ${stringValue2(card.notes)}`.trimEnd() + "\n";
       date,
       start: stringValue2(event.start),
       end: stringValue2(event.end),
+      timeUnknown: event.timeUnknown === true,
       eventStatus: event.status === "used" ? "done" : "planned",
       placeId: "",
       placeRef: "",
@@ -824,8 +827,7 @@ ${stringValue2(card.notes)}`.trimEnd() + "\n";
 
 ## \u5B89\u6392\u5907\u6CE8
 `);
-    const file = await this.app.vault.create(path, content);
-    this.recordSelfWrite(file.path, content);
+    const file = await this.selfAuthoredWrite(path, content, () => this.app.vault.create(path, content));
     this.knownMtimes.set(file.path, file.stat.mtime);
     return file;
   }
@@ -854,16 +856,14 @@ ${stringValue2(card.notes)}`.trimEnd() + "\n";
     const next = updater({ ...parsed.frontmatter }, parsed.body);
     const content = buildMarkdown(next.frontmatter, next.body);
     if (content === original) return;
-    await this.app.vault.modify(file, content);
-    this.recordSelfWrite(path, content);
+    await this.selfAuthoredWrite(path, content, () => this.app.vault.modify(file, content));
     this.knownMtimes.set(path, file.stat.mtime);
   }
   async rollback(backups, createdPaths) {
     for (const [path, content] of [...backups.entries()].reverse()) {
       const file = this.app.vault.getAbstractFileByPath(path);
       if (!(file instanceof import_obsidian.TFile)) continue;
-      await this.app.vault.modify(file, content).catch(() => void 0);
-      this.recordSelfWrite(path, content);
+      await this.selfAuthoredWrite(path, content, () => this.app.vault.modify(file, content)).catch(() => void 0);
       this.knownMtimes.set(path, file.stat.mtime);
     }
     for (const path of [...createdPaths].reverse()) {
@@ -882,7 +882,7 @@ ${stringValue2(card.notes)}`.trimEnd() + "\n";
       const existing = this.app.vault.getAbstractFileByPath(current);
       if (existing instanceof import_obsidian.TFolder) continue;
       if (existing) throw new Error(`\u65E0\u6CD5\u521B\u5EFA\u76EE\u5F55\uFF0C\u8DEF\u5F84\u5DF2\u88AB\u6587\u4EF6\u5360\u7528\uFF1A${current}`);
-      await this.app.vault.createFolder(current);
+      await this.selfAuthoredWrite(current, null, () => this.app.vault.createFolder(current));
     }
   }
   async uniquePath(folder, fileName) {
@@ -895,8 +895,15 @@ ${stringValue2(card.notes)}`.trimEnd() + "\n";
     }
     return candidate;
   }
-  recordSelfWrite(path, content) {
-    this.selfWrites.set(path, { hash: contentHash(content), until: Date.now() + SELF_WRITE_TTL_MS });
+  async selfAuthoredWrite(path, content, write) {
+    const token = { hash: content === null ? null : contentHash(content), until: Date.now() + SELF_WRITE_TTL_MS };
+    this.selfWrites.set(path, token);
+    try {
+      return await write();
+    } catch (error) {
+      if (this.selfWrites.get(path) === token) this.selfWrites.delete(path);
+      throw error;
+    }
   }
 };
 
@@ -1220,14 +1227,15 @@ async function mountCouponCalendar(container, bridge) {
       `);
       }
     }
-    replaceWithHtml(el.calendarGrid, headerHtml + bodyParts.join(""));
+    const unknownRows = days.some((day) => state.events.some((event) => event.timeUnknown && event.date === toDateInputValue(day))) ? `<div class="hour-label">\u672A\u8BB0\u65F6</div>` + days.map((day) => `<div class="date-only-events">${renderMonthEvents(state.events.filter((event) => event.timeUnknown && event.date === toDateInputValue(day)))}</div>`).join("") : "";
+    replaceWithHtml(el.calendarGrid, headerHtml + unknownRows + bodyParts.join(""));
     el.calendarGrid.querySelectorAll(".calendar-cell").forEach((cell) => {
       cell.addEventListener("dragover", handleCalendarDragOver);
       cell.addEventListener("dragleave", handleCalendarDragLeave);
       cell.addEventListener("drop", handleCalendarDrop);
       cell.addEventListener("click", handleCalendarCellClick);
     });
-    el.calendarGrid.querySelectorAll(".event-chip").forEach((node) => {
+    el.calendarGrid.querySelectorAll(".event-chip, .date-only-events .month-event").forEach((node) => {
       node.addEventListener("dragstart", handleEventDragStart);
       node.addEventListener("click", (event) => {
         event.stopPropagation();
@@ -1472,7 +1480,7 @@ ${group.map(({ card, point: mapPoint }) => `${card.title || "\u672A\u547D\u540D\
     markerLayer.replaceChildren(...markerNodes);
   }
   function renderEventsForCell(date, hour) {
-    const events = state.events.filter((event) => event.date === date && Math.floor(toMinutes(event.start) / 60) === hour).sort((a, b) => toMinutes(a.start) - toMinutes(b.start));
+    const events = state.events.filter((event) => !event.timeUnknown && event.date === date && Math.floor(toMinutes(event.start) / 60) === hour).sort((a, b) => toMinutes(a.start) - toMinutes(b.start));
     return events.map((event, index) => {
       const card = getCard(event.cardId);
       if (!card || !cardMatchesFilters(card)) return "";
@@ -1556,7 +1564,7 @@ ${group.map(({ card, point: mapPoint }) => `${card.title || "\u672A\u547D\u540D\
           data-status="${escapeAttribute(event.status || "")}"
           draggable="${event.status === "used" ? "false" : "true"}"
           title="${escapeAttribute(formatIssues(issues) || card.title)}">
-          <span class="month-event-time">${escapeHtml(event.start)}</span>
+          <span class="month-event-time">${escapeHtml(event.timeUnknown ? "\u672A\u8BB0\u65F6" : event.start)}</span>
           <span class="month-event-title">${escapeHtml(getCardDisplayTitle(card))}</span>
         </article>
       `;
@@ -1694,6 +1702,7 @@ ${group.map(({ card, point: mapPoint }) => `${card.title || "\u672A\u547D\u540D\
   }
   function renderEventEditor(event) {
     return `
+    ${event.timeUnknown ? `<div class="meta-line">\u65F6\u95F4\u672A\u8BB0\u5F55\uFF1B\u4E0D\u8FDB\u884C\u5177\u4F53\u65F6\u6BB5\u51B2\u7A81\u5224\u65AD\u3002</div>` : ""}
     <div class="field-grid">
       <div class="field full">
         <div class="field-title">\u65E5\u5386\u5B89\u6392</div>
@@ -1956,7 +1965,10 @@ ${group.map(({ card, point: mapPoint }) => `${card.title || "\u672A\u547D\u540D\
     if (name === "eventDate") event.date = value;
     if (name === "eventStart") event.start = value;
     if (name === "eventEnd") event.end = value;
-    if (toMinutes(event.end) <= toMinutes(event.start)) {
+    if (["eventStart", "eventEnd"].includes(name) && event.timeUnknown) {
+      event.timeUnknown = !(event.start && event.end);
+    }
+    if (!event.timeUnknown && toMinutes(event.end) <= toMinutes(event.start)) {
       event.end = minutesToTime(Math.min(23 * 60 + 59, toMinutes(event.start) + 60));
     }
     saveState();
@@ -2113,6 +2125,7 @@ ${group.map(({ card, point: mapPoint }) => `${card.title || "\u672A\u547D\u540D\
     const existing = isRecurringCard(card) ? null : getEventByCardId(cardId);
     if (existing) {
       Object.assign(existing, { date, start, end });
+      if (start && end) existing.timeUnknown = false;
       state.selectedEventId = existing.id;
     } else {
       const event = {
@@ -2135,6 +2148,7 @@ ${group.map(({ card, point: mapPoint }) => `${card.title || "\u672A\u547D\u540D\
     const event = getEvent(eventId);
     if (!event || event.status === "used") return;
     Object.assign(event, { date, start, end });
+    if (start && end) event.timeUnknown = false;
     state.selectedEventId = eventId;
     state.selectedCardId = event.cardId;
     commit();
@@ -2323,19 +2337,21 @@ ${group.map(({ card, point: mapPoint }) => `${card.title || "\u672A\u547D\u540D\
     const card = getCard(event.cardId);
     if (!card) return [createIssue("\u627E\u4E0D\u5230\u5361\u7247", "error")];
     if (isAlwaysUsableCard(card)) {
-      return toMinutes(event.end) <= toMinutes(event.start) ? [createIssue("\u7ED3\u675F\u65F6\u95F4\u5F02\u5E38", "error")] : [];
+      return !event.timeUnknown && toMinutes(event.end) <= toMinutes(event.start) ? [createIssue("\u7ED3\u675F\u65F6\u95F4\u5F02\u5E38", "error")] : [];
     }
     const issues = [];
     const start = toMinutes(event.start);
     const end = toMinutes(event.end);
     const usableStart = toMinutes(card.usableStart || "00:00");
     const usableEnd = toMinutes(card.usableEnd || "23:59");
-    if (event.date < card.validFrom) issues.push(createIssue("\u65E9\u4E8E\u6709\u6548\u671F", "error"));
-    if (event.date > card.validTo) {
+    if (card.validFrom && event.date < card.validFrom) issues.push(createIssue("\u65E9\u4E8E\u6709\u6548\u671F", "error"));
+    if (card.validTo && event.date > card.validTo) {
       issues.push(createIssue(card.type === "food" ? "\u665A\u4E8E\u4FDD\u8D28\u671F" : "\u665A\u4E8E\u6709\u6548\u671F", "error"));
     }
-    if (start < usableStart || end > usableEnd) issues.push(createIssue("\u4E0D\u5728\u53EF\u7528\u65F6\u6BB5", "error"));
-    if (end <= start) issues.push(createIssue("\u7ED3\u675F\u65F6\u95F4\u5F02\u5E38", "error"));
+    if (!event.timeUnknown) {
+      if (start < usableStart || end > usableEnd) issues.push(createIssue("\u4E0D\u5728\u53EF\u7528\u65F6\u6BB5", "error"));
+      if (end <= start) issues.push(createIssue("\u7ED3\u675F\u65F6\u95F4\u5F02\u5E38", "error"));
+    }
     return issues;
   }
   function createIssue(message, severity) {

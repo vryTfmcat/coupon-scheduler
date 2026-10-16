@@ -1,7 +1,7 @@
 {
   "id": "coupon-scheduler",
   "name": "Coupon Scheduler",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "minAppVersion": "1.6.0",
   "description": "Schedule Markdown-backed coupons, groceries, reminders, and recurring activities with conflict-safe write-back.",
   "author": "vryTfmcat",

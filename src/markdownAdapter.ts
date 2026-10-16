@@ -41,6 +41,7 @@ export interface PlannerEvent {
   date: string;
   start: string;
   end: string;
+  timeUnknown?: boolean;
   status?: "used";
   createdAt: string;
   updatedAt: string;
@@ -191,6 +192,7 @@ export function eventFromMarkdown(file: MarkdownSourceFile): PlannerEvent | null
     date: stringValue(frontmatter.date),
     start: stringValue(frontmatter.start),
     end: stringValue(frontmatter.end),
+    timeUnknown: frontmatter.timeUnknown === true,
     status: status === "done" ? "used" : undefined,
     createdAt: stringValue(frontmatter.created),
     updatedAt: stringValue(frontmatter.updated),

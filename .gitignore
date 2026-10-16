@@ -1,4 +1,9 @@
 node_modules/
-*.map
 .DS_Store
-data.json
+npm-debug.log*
+repair-backups/
+private-data/
+.env
+.env.*
+!.env.example
+*.log

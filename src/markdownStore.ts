@@ -487,8 +487,7 @@ export class MarkdownPlannerStore {
     this.applyCardFrontmatter(frontmatter, card, kind, true);
     const body = `# ${title}\n\n## 备注\n\n${stringValue(card.notes)}`.trimEnd() + "\n";
     const content = buildMarkdown(frontmatter, body);
-    const file = await this.app.vault.create(path, content);
-    this.recordSelfWrite(file.path, content);
+    const file = await this.selfAuthoredWrite(path, content, () => this.app.vault.create(path, content));
     this.knownMtimes.set(file.path, file.stat.mtime);
     return { path: file.path, kind };
   }
@@ -567,6 +566,7 @@ export class MarkdownPlannerStore {
       frontmatter.date = stringValue(event.date);
       frontmatter.start = stringValue(event.start);
       frontmatter.end = stringValue(event.end);
+      frontmatter.timeUnknown = event.timeUnknown === true;
       frontmatter.eventStatus = event.status === "used" ? "done" : "planned";
       frontmatter.updated = localIsoTimestamp();
       return { frontmatter, body };
@@ -595,6 +595,7 @@ export class MarkdownPlannerStore {
       date,
       start: stringValue(event.start),
       end: stringValue(event.end),
+      timeUnknown: event.timeUnknown === true,
       eventStatus: event.status === "used" ? "done" : "planned",
       placeId: "",
       placeRef: "",
@@ -605,8 +606,7 @@ export class MarkdownPlannerStore {
       tags: ["记录/券食安排"],
     };
     const content = buildMarkdown(frontmatter, `# ${date} 使用${title}\n\n## 安排备注\n`);
-    const file = await this.app.vault.create(path, content);
-    this.recordSelfWrite(file.path, content);
+    const file = await this.selfAuthoredWrite(path, content, () => this.app.vault.create(path, content));
     this.knownMtimes.set(file.path, file.stat.mtime);
     return file;
   }
@@ -642,8 +642,7 @@ export class MarkdownPlannerStore {
     const next = updater({ ...parsed.frontmatter }, parsed.body);
     const content = buildMarkdown(next.frontmatter, next.body);
     if (content === original) return;
-    await this.app.vault.modify(file, content);
-    this.recordSelfWrite(path, content);
+    await this.selfAuthoredWrite(path, content, () => this.app.vault.modify(file, content));
     this.knownMtimes.set(path, file.stat.mtime);
   }
 
@@ -651,8 +650,7 @@ export class MarkdownPlannerStore {
     for (const [path, content] of [...backups.entries()].reverse()) {
       const file = this.app.vault.getAbstractFileByPath(path);
       if (!(file instanceof TFile)) continue;
-      await this.app.vault.modify(file, content).catch(() => undefined);
-      this.recordSelfWrite(path, content);
+      await this.selfAuthoredWrite(path, content, () => this.app.vault.modify(file, content)).catch(() => undefined);
       this.knownMtimes.set(path, file.stat.mtime);
     }
     for (const path of [...createdPaths].reverse()) {
@@ -672,7 +670,7 @@ export class MarkdownPlannerStore {
       const existing = this.app.vault.getAbstractFileByPath(current);
       if (existing instanceof TFolder) continue;
       if (existing) throw new Error(`无法创建目录，路径已被文件占用：${current}`);
-      await this.app.vault.createFolder(current);
+      await this.selfAuthoredWrite(current, null, () => this.app.vault.createFolder(current));
     }
   }
 
@@ -687,7 +685,15 @@ export class MarkdownPlannerStore {
     return candidate;
   }
 
-  private recordSelfWrite(path: string, content: string): void {
-    this.selfWrites.set(path, { hash: contentHash(content), until: Date.now() + SELF_WRITE_TTL_MS });
+  private async selfAuthoredWrite<T>(path: string, content: string | null, write: () => Promise<T>): Promise<T> {
+    // Vault events can fire before create/modify resolves. Mark before invoking it.
+    const token = { hash: content === null ? null : contentHash(content), until: Date.now() + SELF_WRITE_TTL_MS };
+    this.selfWrites.set(path, token);
+    try {
+      return await write();
+    } catch (error) {
+      if (this.selfWrites.get(path) === token) this.selfWrites.delete(path);
+      throw error;
+    }
   }
 }

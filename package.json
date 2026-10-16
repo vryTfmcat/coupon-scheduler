@@ -1,6 +1,6 @@
 {
   "name": "coupon-scheduler",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "type": "module",
   "description": "Schedule coupons, groceries, shopping reminders, and recurring activities in Obsidian.",
   "main": "main.js",
