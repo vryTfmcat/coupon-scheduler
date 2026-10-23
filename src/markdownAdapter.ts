@@ -1,3 +1,5 @@
+import { normalizeSort, normalizeExpiry } from "./cardFilters.ts";
+
 export const UI_CARD_TYPES = ["redPacket", "voucher", "weeklyActivity", "food", "delivery"] as const;
 
 export type UiCardType = (typeof UI_CARD_TYPES)[number];
@@ -63,6 +65,9 @@ export interface PlannerUiState {
     type: string;
     tag: string;
     search: string;
+    expiry: string;
+    place: string;
+    sort: string;
   };
   map?: Record<string, unknown>;
 }
@@ -234,6 +239,9 @@ export function extractUiState(state: unknown): PlannerUiState {
       type: stringValue(filters.type) || "all",
       tag: stringValue(filters.tag) || "all",
       search: stringValue(filters.search),
+      expiry: normalizeExpiry(filters.expiry),
+      place: stringValue(filters.place) || "all",
+      sort: normalizeSort(filters.sort),
     },
     ...(map ? { map } : {}),
   };
