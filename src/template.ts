@@ -30,6 +30,9 @@ export function createAppTemplate(brandIconUrl: string): string {
     <section class="filterbar" aria-label="筛选">
       <label><span>类型</span><select id="typeFilter"></select></label>
       <label><span>标签</span><select id="tagFilter"></select></label>
+      <label><span>到期范围</span><select id="expiryFilter"></select></label>
+      <label class="place-filter"><span>地点</span><select id="placeFilter"></select></label>
+      <label><span>排序</span><select id="sortFilter" aria-label="卡片排序"></select></label>
       <label class="search-field"><span>搜索</span><input id="searchInput" type="search" placeholder="名称 / 来源 / 备注" /></label>
     </section>
 

@@ -1,5 +1,7 @@
 import { cardEntityKind, cardIdPrefix, createStableId } from "./writeHelpers";
 
+import { cardPlace, compareCards, matchesExpiry, normalizeSort, normalizeExpiry, sortOptions, expiryOptions } from "./cardFilters.ts";
+
 const typeMeta = {
   redPacket: { label: "红包", color: "#b94a3d" },
   voucher: { label: "团购券", color: "#336a9c" },
@@ -52,6 +54,9 @@ export async function mountCouponCalendar(container, bridge) {
     importFile: root.querySelector("#importFile"),
     typeFilter: root.querySelector("#typeFilter"),
     tagFilter: root.querySelector("#tagFilter"),
+    expiryFilter: root.querySelector("#expiryFilter"),
+    placeFilter: root.querySelector("#placeFilter"),
+    sortFilter: root.querySelector("#sortFilter"),
     searchInput: root.querySelector("#searchInput"),
     inboxTitle: root.querySelector("#inboxTitle"),
     unscheduledCards: root.querySelector("#unscheduledCards"),
@@ -121,6 +126,9 @@ function createDefaultState() {
       type: "all",
       tag: "all",
       search: "",
+      expiry: "all",
+      place: "all",
+      sort: "expiryAsc",
     },
     map: { ...defaultMapSettings },
   };
@@ -142,6 +150,9 @@ function normalizeState(nextState) {
       type: nextState.filters?.type || "all",
       tag: nextState.filters?.tag || "all",
       search: nextState.filters?.search || "",
+      expiry: normalizeExpiry(nextState.filters?.expiry),
+      place: nextState.filters?.place || "all",
+      sort: normalizeSort(nextState.filters?.sort),
     },
     map: {
       ...defaultMapSettings,
@@ -182,6 +193,9 @@ function syncControls() {
   el.typeFilter.value = state.filters.type;
   el.tagFilter.value = state.filters.tag;
   el.searchInput.value = state.filters.search;
+  el.expiryFilter.value = state.filters.expiry;
+  el.placeFilter.value = state.filters.place;
+  el.sortFilter.value = state.filters.sort;
 }
 
 function replaceOptions(select, options) {
@@ -206,6 +220,15 @@ function replaceWithHtml(container, html) {
 }
 
 function renderFilters() {
+  replaceOptions(el.expiryFilter, expiryOptions);
+  replaceOptions(el.sortFilter, sortOptions);
+  const places = Array.from(new Set(state.cards.filter(card => !["used", "discarded"].includes(card.status)).map(cardPlace).filter(Boolean))).sort((a, b) => a.localeCompare(b, "zh-Hans-CN"));
+  // Preserve a selected location even if its last card was just completed.
+  if (!["all", "__unknown__"].includes(state.filters.place) && !places.includes(state.filters.place)) places.push(state.filters.place);
+  replaceOptions(el.placeFilter, [["all", "全部地点"], ["__unknown__", "未填地点"], ...places.map(place => [place, place])]);
+  el.expiryFilter.value = state.filters.expiry;
+  el.sortFilter.value = state.filters.sort;
+  el.placeFilter.value = state.filters.place;
   const currentType = state.filters.type;
   const currentTag = state.filters.tag;
   replaceOptions(el.typeFilter, [
@@ -233,7 +256,7 @@ function renderUnscheduledCards() {
       return (isRecurringCard(card) || !scheduledIds.has(card.id)) && !["used", "discarded"].includes(card.status);
     },
   );
-  const cards = baseCards.filter(cardMatchesInboxPage);
+  const cards = baseCards.filter(cardMatchesInboxPage).sort((a, b) => compareCards(a, b, state.filters.sort));
 
   el.inboxTitle.textContent = state.inboxPage === "trash" ? "回收站" : "未安排卡片";
   el.inboxCount.textContent = `${cards.length}/${baseCards.length}`;
@@ -1512,7 +1535,9 @@ function cardMatchesFilters(card) {
   const haystack = [card.title, card.merchantName, card.source, card.location, card.value, getRepeatLabel(card), card.notes, ...(card.tags || [])]
     .join(" ")
     .toLowerCase();
-  return matchesType && matchesTag && (!search || haystack.includes(search));
+  const place = cardPlace(card);
+  const matchesPlace = state.filters.place === "all" || (state.filters.place === "__unknown__" ? !place : place === state.filters.place);
+  return matchesType && matchesTag && matchesPlace && matchesExpiry(card, state.filters.expiry, toDateInputValue(new Date())) && (!search || haystack.includes(search));
 }
 
 function getCardDisplayTitle(card) {
@@ -1705,6 +1730,10 @@ function bindEvents() {
     state.filters.tag = el.tagFilter.value;
     commit();
   });
+
+  for (const [control, key] of [[el.expiryFilter, "expiry"], [el.placeFilter, "place"], [el.sortFilter, "sort"]]) {
+    control.addEventListener("change", () => { state.filters[key] = control.value; commit(); });
+  }
 
   el.searchInput.addEventListener("input", () => {
     state.filters.search = el.searchInput.value;

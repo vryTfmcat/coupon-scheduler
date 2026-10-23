@@ -7,3 +7,6 @@ private-data/
 .env.*
 !.env.example
 *.log
+
+# Exclude dependencies whether they are a directory or a local symlink.
+/node_modules

@@ -1430,3 +1430,7 @@ button:disabled {
 
 /* Date-only records are not placed at an invented midnight slot. */
 .date-only-events { padding: 6px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+
+/* Keep long store names usable in the wrapping filter bar. */
+.filterbar .place-filter select { max-width: min(260px, 55vw); }
+.filterbar label { min-width: 0; }
